@@ -22,6 +22,11 @@ works as a plain local cliamp panel out of the box.
   <a href="docs/04-lights.png">lights</a></sub>
 </p>
 
+
+https://github.com/user-attachments/assets/4a53aa4f-3a55-4ff1-a7ac-a6c00007316e
+
+Music: "Reboot, Dongle, Config file" by sweetchaosmusic © — not covered by the MIT license.
+
 ## Install
 
 ```bash
