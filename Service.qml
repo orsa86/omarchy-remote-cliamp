@@ -194,11 +194,36 @@ Item {
   property real pendingVolumeDb: -999
   readonly property real shownVolumeDb: pendingVolumeDb > -900 ? pendingVolumeDb : volumeDb
 
+  // A drag emits one value per pixel; sending each one makes cliamp step its
+  // gain dozens of times a second with no ramp — audible zipper noise. The
+  // slider stays instant via pendingVolumeDb; the socket gets the first value
+  // right away and then at most one send per 150 ms, always ending on the
+  // final position.
+  property real _volumeTargetDb: -999
+
   function setVolumeDb(value) {
     var db = Math.max(-30, Math.min(6, Math.round(Number(value) || 0)))
     pendingVolumeDb = db
     volumeHold.restart()
+    _volumeTargetDb = db
+    if (!volumeSend.running) {
+      _sendVolume()
+      volumeSend.restart()
+    }
+  }
+
+  function _sendVolume() {
+    if (_volumeTargetDb < -900) return
+    var db = _volumeTargetDb
+    _volumeTargetDb = -999
     if (send('{"cmd":"volume","value":' + db + '}')) settleTimer.restart()
+  }
+
+  Timer {
+    id: volumeSend
+    interval: 150
+    repeat: false
+    onTriggered: root._sendVolume()
   }
 
   Timer {
