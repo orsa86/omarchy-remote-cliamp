@@ -22,6 +22,19 @@ Column {
   readonly property var tracks: service ? service.queue : []
   readonly property int playingIndex: service ? service.queueIndex : -1
 
+  // An album queue repeats one artist forty times and the repeated prefix
+  // elides every title. When the whole queue is one artist the rows drop the
+  // name (the hero already shows it) and give the width to the titles.
+  readonly property bool oneArtist: {
+    if (tracks.length < 2) return false
+    var first = String(tracks[0].artist || "")
+    if (first.length === 0) return false
+    for (var i = 1; i < tracks.length; i++) {
+      if (String(tracks[i].artist || "") !== first) return false
+    }
+    return true
+  }
+
   readonly property Item listItem: queueList
 
   readonly property int listMaxHeight: Style.space(240)
@@ -131,14 +144,15 @@ Column {
           Layout.preferredWidth: Style.space(20)
         }
 
-        Text {
-          textFormat: Text.PlainText
+        // The cursor row scrolls its full text (MarqueeText only moves when it
+        // overflows); rows at rest stay clipped and quiet.
+        MarqueeText {
           Layout.fillWidth: true
-          text: (modelData.artist ? modelData.artist + " · " : "") + modelData.title
+          text: (!root.oneArtist && modelData.artist ? modelData.artist + " · " : "") + modelData.title
           color: qrow.playing ? Color.accent : root.foreground
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.body
-          elide: Text.ElideRight
+          fontFamily: root.fontFamily
+          pixelSize: Style.font.body
+          active: qrow.hasCursor
         }
 
         Text {
