@@ -116,7 +116,10 @@ Column {
       minimum: -30
       maximum: 6
       value: root.service ? root.service.shownVolumeDb : 0
-      foreground: root.foreground
+      // Gain above 0 dB clips the samples before the DAC — a stray click on
+      // the slider's right end lands there silently, so the line turns urgent
+      // while it does.
+      foreground: root.service && root.service.shownVolumeDb > 0 ? Color.urgent : root.foreground
       enabled: root.live
       onMoved: function (v) { if (root.service) root.service.setVolumeDb(v) }
       onRightClicked: if (root.service) root.service.setVolumeDb(0)

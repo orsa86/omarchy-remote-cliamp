@@ -94,10 +94,13 @@ Panel {
     if (i < 0 || i >= services.length || i === activeIndex) { serverOpen = false; return }
     activeIndex = i
     serverOpen = false
+    // Copy the shell's CURRENT entry and change only activeServer. Assigning
+    // the copy back to root.settings would sever the binding to the shell, so
+    // every later write would push a stale snapshot over shell.json — external
+    // edits (renamed servers, new settings) silently reverted.
     var entry = { id: root.moduleName }
     for (var key in root.settings) if (key !== "id") entry[key] = root.settings[key]
     entry.activeServer = services[i].label
-    root.settings = entry
     if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function")
       root.bar.shell.updateEntryInline(root.moduleName, entry)
   }
