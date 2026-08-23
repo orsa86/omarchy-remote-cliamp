@@ -8,6 +8,10 @@ section in the panel (or the wheel on the bar icon) switches between them, and e
 server keeps its own tunnel and heartbeat alive so switching is instant and the picker
 shows live state per server.
 
+Remote is opt-in, not required: with no configuration at all the widget drives the
+cliamp on this machine (a built-in `local` server, no ssh involved), so it also
+works as a plain local cliamp panel out of the box.
+
 ## Install
 
 ```bash

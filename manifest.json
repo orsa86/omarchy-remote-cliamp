@@ -5,7 +5,7 @@
   "version": "0.2.0",
   "author": "orsa",
   "license": "MIT",
-  "description": "Control cliamp players on remote servers over SSH-forwarded sockets. One widget, a server picker in the panel, live state per server.",
+  "description": "Control cliamp players on remote servers over SSH-forwarded sockets — or the local cliamp with zero config. One widget, a server picker in the panel, live state per server.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Remote Cliamp",
-    "description": "Cliamps on other machines, driven over SSH, switched from one panel.",
+    "description": "Cliamps on other machines driven over SSH — and the local one — switched from one panel.",
     "category": "Media",
     "allowMultiple": false,
     "defaultSection": "right",
