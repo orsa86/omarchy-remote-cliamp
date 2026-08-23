@@ -385,42 +385,11 @@ Item {
     lyricsTimeout.stop()
     if (wanted === String(status.path || "")) {
       lyrics = Model.parseLyrics(raw)
-      if (lyrics.length > 0) { lyricsStatus = "ok"; return }
-      tryLyricsFallback()
+      lyricsStatus = lyrics.length > 0 ? "ok" : "notfound"
       return
     }
     lyricsTrackPath = ""
     refreshLyrics()
-  }
-
-  // ---- local .lrc fallback ----
-  // When the remote cliamp's own chain (tags → LRCLIB → NetEase) comes up empty,
-  // look for "<artist> - <title>.lrc" in ~/.local/share/remote-cliamp/lyrics on
-  // THIS machine. Covers tracks whose LRCLIB record exists but their search
-  // cannot find (e.g. the "Reboot, Dongle, Config file" scoring bug).
-  property string lyricsFallbackFor: ""
-
-  function tryLyricsFallback() {
-    if (artist.length === 0 && title.length === 0) { lyricsStatus = "notfound"; return }
-    var name = (artist + " - " + title).replace(/[\/\\:*?"<>|]/g, "_")
-    lyricsFallbackFor = String(status.path || "")
-    lrcFileProcess.command = ["cat",
-      Quickshell.env("HOME") + "/.local/share/remote-cliamp/lyrics/" + name + ".lrc"]
-    lrcFileProcess.running = true
-  }
-
-  Process {
-    id: lrcFileProcess
-    command: []
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        if (root.lyricsFallbackFor !== String(root.status.path || "")) return
-        var lines = Model.parseLrcText(text)
-        if (lines.length > 0) { root.lyrics = lines; root.lyricsStatus = "ok" }
-        else root.lyricsStatus = "notfound"
-      }
-    }
   }
 
   function syncPosition() {

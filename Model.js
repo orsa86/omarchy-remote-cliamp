@@ -274,21 +274,6 @@ function ackError(raw) {
   return String(data.error || "")
 }
 
-// A raw .lrc file ("[01:07.42]line") into the same shape parseLyrics yields,
-// for the local-file fallback when the remote cliamp finds nothing online.
-function parseLrcText(raw) {
-  var out = []
-  var lines = String(raw || "").split("\n")
-  for (var i = 0; i < lines.length; i++) {
-    var m = lines[i].match(/^\[(\d+):(\d+(?:\.\d+)?)\](.*)$/)
-    if (!m) continue
-    var body = m[3].trim()
-    if (body.length === 0) continue
-    out.push({ start: Number(m[1]) * 60 + Number(m[2]), text: body })
-  }
-  return out
-}
-
 // Sample input, the reply to {"cmd":"lyrics"}, measured on the box:
 // {"ok":true,"lyrics":[{"start":30.23,"text":"One more time"}]}
 // A track with no lyrics answers {"ok":false,"error":"no lyrics found"} instead.
