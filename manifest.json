@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "id": "orsa.remote-cliamp",
+  "name": "Remote Cliamp",
+  "version": "0.2.0",
+  "author": "orsa",
+  "license": "MIT",
+  "description": "Control cliamp players on remote servers over SSH-forwarded sockets. One widget, a server picker in the panel, live state per server.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Remote Cliamp",
+    "description": "Cliamps on other machines, driven over SSH, switched from one panel.",
+    "category": "Media",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "servers": [],
+      "activeServer": "",
+      "statusIntervalSec": 2,
+      "hideWhenOffline": false,
+      "lyricTrimMs": 0,
+      "ledfxUrl": ""
+    },
+    "schema": [
+      {
+        "key": "ledfxUrl",
+        "type": "string",
+        "label": "LedFx URL",
+        "description": "http(s) address of a LedFx instance, e.g. http://lights.lan:8888. Empty hides the LIGHTS section.",
+        "defaultValue": ""
+      },
+      {
+        "key": "statusIntervalSec",
+        "type": "integer",
+        "label": "Seconds between status refreshes",
+        "defaultValue": 2,
+        "min": 1,
+        "max": 10
+      },
+      {
+        "key": "hideWhenOffline",
+        "type": "boolean",
+        "label": "Hide the icon when the active server is unreachable",
+        "defaultValue": false
+      },
+      {
+        "key": "lyricTrimMs",
+        "type": "integer",
+        "label": "Lyric timing trim in milliseconds",
+        "defaultValue": 0,
+        "min": -1000,
+        "max": 1000,
+        "step": 10
+      }
+    ]
+  }
+}

@@ -1,0 +1,522 @@
+#!/usr/bin/env python3
+
+"""Browse the Subsonic library a REMOTE cliamp is streaming from, and play things on it.
+
+Same idea as the local plugin's cliamp-library, with the machine boundary moved: the
+Subsonic token is borrowed from what the remote cliamp is playing (its status over
+ssh), the browse calls go from THIS machine straight to the Navidrome server, and a
+play is delivered by writing the scratch playlist onto the REMOTE box over ssh and
+telling the remote cliamp to load it. Audio never touches this machine.
+
+Usage:
+  remote-cliamp-library <ssh-target> <remote-cliamp> <ctl-path> <stream-url> <verb> [args]
+
+Verbs:
+  albums [limit] | search <query>       browse rows as JSON (albums, songs, artists)
+  artist-albums <artistId>              one artist's albums as JSON rows
+  play <albumId> | play-song <songId>   replace the remote queue and play
+  urls <albumId> | url-song <songId>    stream URLs as JSON, for socket queueing
+  radio <query>                         Radio Browser stations as JSON rows
+  play-radio <url> <name>               replace the remote queue with one station
+
+<ctl-path> is the ssh ControlPath the plugin's tunnel already holds open, so every
+ssh here is a channel on a live connection rather than a fresh handshake.
+<stream-url> is what the remote cliamp is currently playing (may be empty); when it
+carries a Subsonic token, no ssh probe is needed at all.
+"""
+
+import json
+import subprocess
+import sys
+import urllib.parse
+import urllib.request
+
+AUTH_FIELDS = ("u", "t", "s", "c", "v")
+TIMEOUT_SEC = 8
+
+# Overwritten on every play. Same reserved name as the local plugin, so the row
+# filter in Model.js hides it in both.
+SCRATCH_PLAYLIST = "cliampui"
+
+SSH_OPTS = ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
+
+CTL_PATH = ""
+
+
+def ssh(target, remote_line, stdin_text=None):
+    """Run a shell line on the target. target "local" runs it right here — the
+    playlist writes, status probes and loads are the same lines either way."""
+    if target == "local":
+        argv = ["bash", "-c", remote_line]
+    else:
+        opts = list(SSH_OPTS)
+        if CTL_PATH:
+            opts += ["-o", "ControlMaster=auto",
+                     "-o", "ControlPath=" + CTL_PATH,
+                     "-o", "ControlPersist=60"]
+        argv = ["ssh", *opts, target, remote_line]
+    try:
+        out = subprocess.run(
+            argv, capture_output=True, text=True, timeout=20, input=stdin_text,
+        )
+        return out.stdout
+    except Exception:
+        return ""
+
+
+def sh_quote(value):
+    return "'" + str(value).replace("'", "'\\''") + "'"
+
+
+def current_stream_url(target, cliamp):
+    try:
+        raw = ssh(target, cliamp + " status --json")
+        return (json.loads(raw).get("track") or {}).get("path") or ""
+    except Exception:
+        return ""
+
+
+def playlist_stream_url(target):
+    """A token borrowed from the playlists already on the remote disk, for a daemon
+    that just started and is playing nothing yet."""
+    raw = ssh(
+        target,
+        'grep -h \'^path = "\' ~/.config/cliamp/playlists/*.toml 2>/dev/null | head -50',
+    )
+    for line in raw.split("\n"):
+        line = line.strip()
+        if not line.startswith('path = "'):
+            continue
+        url = line[len('path = "'):].rstrip('"')
+        if "/rest/stream?" in url:
+            return url
+    return ""
+
+
+def server_from(url):
+    if "?" not in url:
+        return None, None
+    base, query = url.split("?", 1)
+    if not base.startswith("https://") or not base.endswith("/rest/stream"):
+        return None, None
+    host = base[: -len("/rest/stream")]
+    kept = [
+        pair
+        for pair in query.split("&")
+        if pair.split("=", 1)[0] in AUTH_FIELDS and "=" in pair
+    ]
+    if not kept:
+        return None, None
+    return host, "&".join(kept)
+
+
+def call(host, auth, endpoint, **params):
+    query = auth + "&f=json&" + urllib.parse.urlencode(params)
+    with urllib.request.urlopen(
+        host + "/rest/" + endpoint + "?" + query, timeout=TIMEOUT_SEC
+    ) as response:
+        body = json.loads(response.read().decode())
+    return body.get("subsonic-response") or {}
+
+
+def album_row(a):
+    return {
+        "kind": "album",
+        "id": a.get("id"),
+        "name": a.get("name") or "",
+        "artist": a.get("artist") or "",
+        "year": a.get("year") or 0,
+        "songCount": a.get("songCount") or 0,
+    }
+
+
+def song_row(s):
+    return {
+        "kind": "song",
+        "id": s.get("id"),
+        "name": s.get("title") or "",
+        "artist": s.get("artist") or "",
+        "album": s.get("album") or "",
+        "duration": s.get("duration") or 0,
+    }
+
+
+def artist_row(a):
+    # songCount carries the album count; the row kind is what the panel labels.
+    return {
+        "kind": "artist",
+        "id": a.get("id"),
+        "name": a.get("name") or "",
+        "artist": "",
+        "songCount": a.get("albumCount") or 0,
+    }
+
+
+def albums(host, auth, limit):
+    data = call(host, auth, "getAlbumList2", type="alphabeticalByName", size=limit)
+    found = (data.get("albumList2") or {}).get("album") or []
+    return [album_row(a) for a in found]
+
+
+def search(host, auth, query, limit):
+    data = call(
+        host, auth, "search3",
+        query=query, albumCount=limit, artistCount=limit, songCount=limit,
+    )
+    result = data.get("searchResult3") or {}
+    # Artists first: there are few of them and each opens a whole catalogue, while
+    # albums and songs arrive a hundred each — at the end they would never be seen.
+    rows = [artist_row(a) for a in (result.get("artist") or [])]
+    rows.extend(album_row(a) for a in (result.get("album") or []))
+    rows.extend(song_row(s) for s in (result.get("song") or []))
+    return rows
+
+
+def artist_albums(host, auth, artist_id):
+    """The drill-down behind an artist row, the panel's version of the native
+    By Artist browse: getArtist returns the artist's albums."""
+    data = call(host, auth, "getArtist", id=artist_id)
+    found = (data.get("artist") or {}).get("album") or []
+    return [album_row(a) for a in found]
+
+
+def album_song_rows(host, auth, album_id):
+    """The track screen behind an album row. Rows carry the album id so the panel
+    can ask for play-from on any of them."""
+    data = call(host, auth, "getAlbum", id=album_id)
+    album = data.get("album") or {}
+    rows = []
+    for s in album.get("song") or []:
+        if not s.get("id"):
+            continue
+        rows.append({
+            "kind": "albumsong",
+            "id": s["id"],
+            "name": s.get("title") or "",
+            "artist": s.get("artist") or album.get("artist") or "",
+            "album": album.get("name") or "",
+            "albumId": album_id,
+            "duration": s.get("duration") or 0,
+        })
+    return rows
+
+
+def play_album_from(target, cliamp, host, auth, album_id, song_id):
+    """The native track screen's Enter: play the highlighted track and queue the
+    rest. cliamp has no jump-to-track, so the queue becomes the album from that
+    track onward."""
+    data = call(host, auth, "getAlbum", id=album_id)
+    album = data.get("album") or {}
+    songs = [s for s in (album.get("song") or []) if s.get("id")]
+    start = 0
+    for i, s in enumerate(songs):
+        if str(s["id"]) == str(song_id):
+            start = i
+            break
+    tail = songs[start:]
+    if not tail:
+        return 1
+    deliver_playlist(target, cliamp, album, tail, host, auth)
+    print(((tail[0].get("artist") or "") + " - " + (tail[0].get("title") or "")).strip(" -"))
+    return 0
+
+
+def artist_songs(host, auth, artist_id):
+    """Every track across all the artist's albums, in album order — what the native
+    By Artist mode loads when an artist is selected. Returns (artist, songs)."""
+    data = call(host, auth, "getArtist", id=artist_id)
+    artist = data.get("artist") or {}
+    songs = []
+    for a in artist.get("album") or []:
+        if not a.get("id"):
+            continue
+        album = (call(host, auth, "getAlbum", id=a["id"]).get("album") or {})
+        songs.extend(s for s in (album.get("song") or []) if s.get("id"))
+    return artist, songs
+
+
+def play_artist(target, cliamp, host, auth, artist_id):
+    artist, songs = artist_songs(host, auth, artist_id)
+    if not songs:
+        return 1
+    album = {"id": "", "name": "", "artist": artist.get("name") or "",
+             "coverArt": artist.get("coverArt") or ""}
+    deliver_playlist(target, cliamp, album, songs, host, auth)
+    print((artist.get("name") or "") + " - all tracks")
+    return 0
+
+
+def artist_urls(host, auth, artist_id):
+    _, songs = artist_songs(host, auth, artist_id)
+    return [
+        {"path": stream_url(host, auth, s["id"]), "title": s.get("title") or ""}
+        for s in songs
+    ]
+
+
+def stream_url(host, auth, song_id):
+    return (host + "/rest/stream?" + auth + "&format=raw&id="
+            + urllib.parse.quote(str(song_id)))
+
+
+def album_urls(host, auth, album_id):
+    data = call(host, auth, "getAlbum", id=album_id)
+    songs = (data.get("album") or {}).get("song") or []
+    return [
+        {"path": stream_url(host, auth, s["id"]), "title": s.get("title") or ""}
+        for s in songs if s.get("id")
+    ]
+
+
+def song_url(host, auth, song_id):
+    data = call(host, auth, "getSong", id=song_id)
+    song = data.get("song") or {}
+    if not song.get("id"):
+        return []
+    return [{"path": stream_url(host, auth, song["id"]),
+             "title": song.get("title") or ""}]
+
+
+RADIO_API = "https://all.api.radio-browser.info/json/stations/search"
+
+# The "cliamp radio" builtin is one m3u of curated streams; expanding it here is
+# what turns that single collection row into pickable individual stations.
+BUILTIN_M3U = "https://radio.cliamp.stream/streams.m3u"
+
+
+def builtin_stations():
+    req = urllib.request.Request(
+        BUILTIN_M3U, headers={"User-Agent": "remote-cliamp/0.2"})
+    with urllib.request.urlopen(req, timeout=TIMEOUT_SEC) as response:
+        body = response.read().decode("utf-8", "replace")
+    rows = []
+    name = ""
+    for line in body.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("#EXTINF"):
+            name = line.split(",", 1)[1].strip() if "," in line else ""
+        elif not line.startswith("#"):
+            rows.append({"kind": "radio", "id": line, "name": name or line, "artist": "cliamp radio"})
+            name = ""
+    return rows
+
+
+def radio_search(query, limit=50):
+    """The Radio Browser directory, the same one cliamp's R key browses. Public API,
+    no auth; a User-Agent is required by their usage policy."""
+    params = urllib.parse.urlencode({
+        "name": query, "limit": limit, "hidebroken": "true",
+        "order": "votes", "reverse": "true",
+    })
+    req = urllib.request.Request(
+        RADIO_API + "?" + params,
+        headers={"User-Agent": "remote-cliamp/0.2"},
+    )
+    with urllib.request.urlopen(req, timeout=TIMEOUT_SEC) as response:
+        stations = json.loads(response.read().decode())
+    rows = []
+    for s in stations:
+        url = s.get("url_resolved") or s.get("url") or ""
+        if not url:
+            continue
+        tags = ", ".join(filter(None, [s.get("country") or "", s.get("codec") or ""]))
+        rows.append({
+            "kind": "radio",
+            "id": url,
+            "name": s.get("name") or "",
+            "artist": tags,
+        })
+    return rows
+
+
+def play_radio(target, cliamp, url, name):
+    body = "\n".join([
+        "[[track]]",
+        'path = "%s"' % toml_escape(url),
+        'title = "%s"' % toml_escape(name or "Radio"),
+        "",
+    ])
+    path = "~/.config/cliamp/playlists/" + SCRATCH_PLAYLIST + ".toml"
+    ssh(
+        target,
+        "mkdir -p ~/.config/cliamp/playlists && umask 077 && "
+        "cat > " + path + ".tmp && mv -f " + path + ".tmp " + path + " && "
+        + cliamp + " load " + sh_quote(SCRATCH_PLAYLIST) + " && sleep 0.3 && "
+        + cliamp + " play",
+        stdin_text=body,
+    )
+    print(name or url)
+    return 0
+
+
+def play_album(target, cliamp, host, auth, album_id):
+    data = call(host, auth, "getAlbum", id=album_id)
+    album = data.get("album") or {}
+    songs = album.get("song") or []
+    if not songs:
+        return 1
+    deliver_playlist(target, cliamp, album, songs, host, auth)
+    print(((album.get("artist") or "") + " - " + (album.get("name") or "")).strip(" -"))
+    return 0
+
+
+def play_song(target, cliamp, host, auth, song_id):
+    data = call(host, auth, "getSong", id=song_id)
+    song = data.get("song") or {}
+    if not song.get("id"):
+        return 1
+    album = {
+        "id": song.get("albumId") or "",
+        "name": song.get("album") or "",
+        "artist": song.get("artist") or "",
+        "coverArt": song.get("coverArt") or "",
+    }
+    deliver_playlist(target, cliamp, album, [song], host, auth)
+    print(((song.get("artist") or "") + " - " + (song.get("title") or "")).strip(" -"))
+    return 0
+
+
+def toml_escape(value):
+    return str(value).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def playlist_toml(album, songs, host, auth):
+    art = host + "/rest/getCoverArt?" + auth + "&size=600&id=" + urllib.parse.quote(
+        str(album.get("coverArt") or album.get("id") or "")
+    )
+    lines = []
+    for song in songs:
+        if not song.get("id"):
+            continue
+        stream = (
+            host + "/rest/stream?" + auth + "&format=raw&id="
+            + urllib.parse.quote(str(song["id"]))
+        )
+        lines.append("[[track]]")
+        lines.append('path = "%s"' % toml_escape(stream))
+        lines.append('title = "%s"' % toml_escape(song.get("title") or ""))
+        lines.append('artist = "%s"' % toml_escape(song.get("artist") or album.get("artist") or ""))
+        lines.append('album = "%s"' % toml_escape(album.get("name") or ""))
+        lines.append('album_art_url = "%s"' % toml_escape(art))
+        if song.get("track"):
+            lines.append("track_number = %d" % int(song["track"]))
+        if song.get("duration"):
+            lines.append("duration_secs = %d" % int(song["duration"]))
+        if song.get("year"):
+            lines.append("year = %d" % int(song["year"]))
+        lines.append("")
+    return "\n".join(lines)
+
+
+def deliver_playlist(target, cliamp, album, songs, host, auth):
+    """One round trip: the TOML goes over stdin, lands owner-only via umask, is moved
+    into place atomically, and the remote cliamp loads it. Measured on 1.63.2 over
+    ssh: a CLI load does NOT always start playback on its own, so play follows it."""
+    body = playlist_toml(album, songs, host, auth)
+    path = "~/.config/cliamp/playlists/" + SCRATCH_PLAYLIST + ".toml"
+    ssh(
+        target,
+        "mkdir -p ~/.config/cliamp/playlists && umask 077 && "
+        "cat > " + path + ".tmp && mv -f " + path + ".tmp " + path + " && "
+        + cliamp + " load " + sh_quote(SCRATCH_PLAYLIST) + " && sleep 0.3 && "
+        + cliamp + " play",
+        stdin_text=body,
+    )
+
+
+def main():
+    global CTL_PATH
+    args = sys.argv[1:]
+    if len(args) < 5:
+        return 2
+    target, cliamp, CTL_PATH, panel_url, verb = args[:5]
+    rest = args[5:]
+
+    # Radio never touches the Subsonic server, so it works with no token at all.
+    if verb == "radio":
+        query = " ".join(rest).strip()
+        print(json.dumps(radio_search(query) if query else []))
+        return 0
+
+    if verb == "radio-builtin":
+        print(json.dumps(builtin_stations()))
+        return 0
+
+    if verb == "play-radio" and rest:
+        return play_radio(target, cliamp, rest[0], " ".join(rest[1:]).strip())
+
+    # Cheapest first: the URL the panel already holds, then a status probe over
+    # the multiplexed connection, then the playlists on the remote disk.
+    host, auth = server_from(panel_url)
+    if not host:
+        host, auth = server_from(current_stream_url(target, cliamp))
+    if not host:
+        host, auth = server_from(playlist_stream_url(target))
+    if not host:
+        # Neither a playing track nor a remote playlist held a token to borrow —
+        # a radio-only server lands here, and an empty library is the honest answer.
+        if verb in ("albums", "search", "artist-albums", "album-songs",
+                    "urls", "url-song", "urls-artist"):
+            print("[]")
+        return 0
+
+    if verb == "albums":
+        limit = int(rest[0]) if rest and rest[0].isdigit() else 100
+        print(json.dumps(albums(host, auth, limit)))
+        return 0
+
+    if verb == "search":
+        query = " ".join(rest).strip()
+        if not query:
+            print(json.dumps(albums(host, auth, 200)))
+            return 0
+        print(json.dumps(search(host, auth, query, 100)))
+        return 0
+
+    if verb == "artist-albums" and rest:
+        print(json.dumps(artist_albums(host, auth, rest[0])))
+        return 0
+
+    if verb == "album-songs" and rest:
+        print(json.dumps(album_song_rows(host, auth, rest[0])))
+        return 0
+
+    if verb == "play-from" and len(rest) > 1:
+        return play_album_from(target, cliamp, host, auth, rest[0], rest[1])
+
+    if verb == "play-artist" and rest:
+        return play_artist(target, cliamp, host, auth, rest[0])
+
+    if verb == "urls-artist" and rest:
+        print(json.dumps(artist_urls(host, auth, rest[0])))
+        return 0
+
+    if verb == "urls" and rest:
+        print(json.dumps(album_urls(host, auth, rest[0])))
+        return 0
+
+    if verb == "url-song" and rest:
+        print(json.dumps(song_url(host, auth, rest[0])))
+        return 0
+
+    if verb == "play" and rest:
+        return play_album(target, cliamp, host, auth, rest[0])
+
+    if verb == "play-song" and rest:
+        return play_song(target, cliamp, host, auth, rest[0])
+
+    return 2
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception:
+        if len(sys.argv) > 5 and sys.argv[5] in (
+            "albums", "search", "artist-albums", "album-songs",
+            "urls", "url-song", "urls-artist", "radio", "radio-builtin"
+        ):
+            print("[]")
+        sys.exit(1)
