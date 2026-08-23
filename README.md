@@ -64,14 +64,41 @@ SERVER section (`o`, or the wheel on the bar icon switches), and the `ledfxUrl`
 adds a [LIGHTS section](#lights-ledfx) — drop the line if you have no LedFx.
 The full reference lives in [Configuration](#configuration).
 
-### Remote server requirements
+### Setting up a remote server
 
-- Key-based ssh that works with `BatchMode=yes` (no password prompts).
-- cliamp **>= 1.63** on the server. An unprivileged install works:
-  `cp /usr/local/bin/cliamp ~/.local/bin/ && ~/.local/bin/cliamp --upgrade`.
-- Something on the server owning the socket: the TUI in a tmux, or
-  `cliamp --daemon`. The panel's "Start cliamp daemon on server" row does the
-  latter over ssh when the socket is free.
+The server needs exactly two things: passwordless ssh in, and a cliamp
+(**>= 1.63**) owning its socket.
+
+**1. ssh.** The plugin runs ssh non-interactively (`BatchMode=yes`), so key
+auth has to work without any prompt. One-time setup from your desktop:
+
+```bash
+ssh-keygen -t ed25519          # skip if you already have a key
+ssh-copy-id user@livingroom.lan
+ssh -o BatchMode=yes user@livingroom.lan true && echo ok   # must print "ok"
+```
+
+Anything ssh itself understands works — a `Host` alias from `~/.ssh/config`,
+a port, a jump host — the plugin just passes `sshTarget` to ssh:
+
+```
+Host livingroom.lan
+  User music
+  IdentityFile ~/.ssh/id_ed25519
+```
+
+**2. cliamp.** On the server:
+
+```bash
+cliamp --version               # >= 1.63 (older ones have no IPC socket)
+cliamp --daemon                # or run the TUI in a tmux — either owns the socket
+```
+
+No sudo on the server? An unprivileged upgrade works:
+`cp /usr/local/bin/cliamp ~/.local/bin/ && ~/.local/bin/cliamp --upgrade`.
+
+Nothing has to be running up front: when the socket is free, the panel's
+"Start cliamp daemon on server" row (`f`) starts the daemon over ssh.
 
 ## Search
 
