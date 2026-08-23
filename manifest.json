@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "orsa.remote-cliamp",
   "name": "Remote Cliamp",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "author": "orsa",
   "license": "MIT",
   "description": "Control cliamp players on remote servers over SSH-forwarded sockets — or the local cliamp with zero config. One widget, a server picker in the panel, live state per server.",

@@ -12,6 +12,18 @@ QtObject {
   property var scenes: []
   property bool reachable: false
 
+  // LedFx is a network peer like any other: its replies are bounded before they
+  // are parsed, and the row/name caps below bound what is kept. A timeout alone
+  // would not bound memory.
+  readonly property int maxResponseChars: 1048576
+  readonly property int maxRows: 200
+  readonly property int maxNameChars: 256
+
+  function _clamp(value) {
+    var s = String(value || "")
+    return s.length > maxNameChars ? s.slice(0, maxNameChars) : s
+  }
+
   function _req(method, path, body, done) {
     if (url.length === 0) return
     var xhr = new XMLHttpRequest()
@@ -21,6 +33,7 @@ QtObject {
       var ok = xhr.status >= 200 && xhr.status < 300
       root.reachable = ok || root.reachable && xhr.status !== 0
       if (!ok) { if (xhr.status === 0) root.reachable = false; return }
+      if (String(xhr.responseText || "").length > root.maxResponseChars) return
       var data = null
       try { data = JSON.parse(xhr.responseText) } catch (e) { data = null }
       if (done) done(data)
@@ -39,14 +52,15 @@ QtObject {
       var out = []
       var vs = data && data.virtuals ? data.virtuals : {}
       for (var vid in vs) {
+        if (out.length >= root.maxRows) break
         var v = vs[vid] || {}
         // Dummy devices back mask/layer tricks; only real pixels are offered.
         if (v.is_device === false || String(vid).indexOf("-mask") >= 0
             || String(vid).indexOf("-foreground") >= 0
             || String(vid).indexOf("-background") >= 0) continue
         out.push({
-          id: String(vid),
-          name: String((v.config || {}).name || vid),
+          id: root._clamp(vid),
+          name: root._clamp((v.config || {}).name || vid),
           active: v.active === true
         })
       }
@@ -57,8 +71,10 @@ QtObject {
     _req("GET", "/api/scenes", null, function (data) {
       var out = []
       var sc = data && data.scenes ? data.scenes : {}
-      for (var sid in sc)
-        out.push({ id: String(sid), name: String((sc[sid] || {}).name || sid) })
+      for (var sid in sc) {
+        if (out.length >= root.maxRows) break
+        out.push({ id: root._clamp(sid), name: root._clamp((sc[sid] || {}).name || sid) })
+      }
       out.sort(function (a, b) { return a.name.localeCompare(b.name) })
       root.scenes = out
     })

@@ -1,6 +1,29 @@
 // Pure helpers for the Cliamp panel. No QML imports, so this file is testable with Deno.
 
 var MAX_ERROR_CHARS = 140
+
+// ---- trust-boundary limits ----
+// Everything below parses data from the far side of a trust boundary — a remote
+// cliamp, a Subsonic server, LedFx, Radio Browser. A compromised peer must not
+// be able to balloon the long-lived shell process, so every reply is bounded
+// before it is materialized into model rows: one frame, one row count, one
+// string length. Callers drop oversized frames with frameTooLarge() BEFORE
+// JSON.parse touches them.
+var MAX_FRAME_BYTES = 1048576   // one socket line or helper reply
+var MAX_LIST_ITEMS = 1000       // rows kept from any list reply
+var MAX_TEXT_CHARS = 512        // any display string (title, artist, name, ...)
+var MAX_PATH_CHARS = 8192       // URLs and paths
+var MAX_BAND_COUNT = 32         // spectrum frame
+
+function frameTooLarge(raw) {
+  return String(raw || "").length > MAX_FRAME_BYTES
+}
+
+function clampText(value, max) {
+  var s = String(value || "")
+  return s.length > max ? s.slice(0, max) : s
+}
+
 var SECONDS_PER_MINUTE = 60
 var MINUTES_PER_HOUR = 60
 // Rates within this many Hz are the same rate, covering integer rounding in the graph.
@@ -35,6 +58,10 @@ function defaultStatus() {
 // and prints a plain sentence instead of JSON.
 function parseStatus(raw) {
   var out = defaultStatus()
+  if (frameTooLarge(raw)) {
+    out.lastError = "reply too large"
+    return out
+  }
   var text = String(raw || "").trim()
   if (text.length === 0) {
     out.lastError = "cliamp returned nothing"
@@ -59,13 +86,13 @@ function parseStatus(raw) {
     return out
   }
 
-  out.state = String(data.state || "stopped")
+  out.state = clampText(data.state || "stopped", MAX_TEXT_CHARS)
   out.volumeDb = numberOr(data.volume, 0)
   out.total = numberOr(data.total, 0)
   out.index = numberOr(data.index, -1)
   out.shuffle = data.shuffle === true
-  out.repeat = String(data.repeat || "Off")
-  out.visualizer = String(data.visualizer || "")
+  out.repeat = clampText(data.repeat || "Off", MAX_TEXT_CHARS)
+  out.visualizer = clampText(data.visualizer, MAX_TEXT_CHARS)
   out.eqFlat = bandsAreFlat(data.eq_bands)
 
   out.durationSec = numberOr(data.duration, 0)
@@ -73,10 +100,10 @@ function parseStatus(raw) {
 
   var track = data.track
   if (track && typeof track === "object") {
-    out.title = String(track.title || "")
-    out.path = String(track.path || "")
-    out.artist = String(track.artist || "")
-    out.album = String(track.album || "")
+    out.title = clampText(track.title, MAX_TEXT_CHARS)
+    out.path = clampText(track.path, MAX_PATH_CHARS)
+    out.artist = clampText(track.artist, MAX_TEXT_CHARS)
+    out.album = clampText(track.album, MAX_TEXT_CHARS)
     out.isStream = track.stream === true
     if (out.durationSec <= 0) out.durationSec = numberOr(track.duration_secs, 0)
   }
@@ -203,8 +230,8 @@ function bluetoothCodecLabel(props) {
 // what lets a headless daemon play a library it cannot otherwise browse.
 function parsePlaylists(raw) {
   var out = []
-  var lines = String(raw || "").split("\n")
-  for (var i = 0; i < lines.length; i++) {
+  var lines = clampText(raw, MAX_FRAME_BYTES).split("\n")
+  for (var i = 0; i < lines.length && out.length < MAX_LIST_ITEMS; i++) {
     var line = trim(lines[i])
     if (line.length === 0) continue
 
@@ -219,7 +246,7 @@ function parsePlaylists(raw) {
     var count = parseInt(head.slice(cut), 10)
     var name = trim(head.slice(0, cut))
     if (name.length === 0 || !isFinite(count)) continue
-    out.push({ name: name, count: count })
+    out.push({ name: clampText(name, MAX_TEXT_CHARS), count: count })
   }
   return out
 }
@@ -238,6 +265,7 @@ var NO_LYRICS_ERROR = "no lyrics found"
 // Sample input: {"ok":true,"state":"playing",..} {"ok":true,"lyrics":[..]} {"ok":true,"history":[..]} {"ok":true}
 // Only a status carries state; parsing an ack as one blanks the track.
 function messageKind(raw) {
+  if (frameTooLarge(raw)) return "none"
   var text = String(raw || "").trim()
   if (text.length === 0) return "none"
   var data = null
@@ -264,6 +292,7 @@ function messageKind(raw) {
 
 // Sample input, a command reply that failed: {"ok":false,"error":"playlist not found"}
 function ackError(raw) {
+  if (frameTooLarge(raw)) return ""
   var data = null
   try {
     data = JSON.parse(String(raw || "").trim())
@@ -271,7 +300,7 @@ function ackError(raw) {
     return ""
   }
   if (!data || typeof data !== "object" || data.ok !== false) return ""
-  return String(data.error || "")
+  return elideError(String(data.error || ""))
 }
 
 // Sample input, the reply to {"cmd":"lyrics"}, measured on the box:
@@ -279,6 +308,7 @@ function ackError(raw) {
 // A track with no lyrics answers {"ok":false,"error":"no lyrics found"} instead.
 function parseLyrics(raw) {
   var out = []
+  if (frameTooLarge(raw)) return out
   var text = String(raw || "").trim()
   if (text.length === 0) return out
   var data = null
@@ -288,10 +318,10 @@ function parseLyrics(raw) {
     return out
   }
   if (!data || data.ok !== true || !data.lyrics || data.lyrics.length === undefined) return out
-  for (var i = 0; i < data.lyrics.length; i++) {
+  for (var i = 0; i < data.lyrics.length && out.length < MAX_LIST_ITEMS; i++) {
     var line = data.lyrics[i]
     if (!line) continue
-    var body = String(line.text || "")
+    var body = clampText(line.text, MAX_TEXT_CHARS)
     if (body.length === 0) continue
     out.push({ start: numberOr(line.start, 0), text: body })
   }
@@ -304,6 +334,7 @@ function parseLyrics(raw) {
 // index is omitted when 0, so missing means the first track.
 function parseQueue(raw) {
   var out = { ok: false, index: 0, tracks: [] }
+  if (frameTooLarge(raw)) return out
   var data = null
   try {
     data = JSON.parse(String(raw || "").trim())
@@ -313,13 +344,13 @@ function parseQueue(raw) {
   if (!data || data.ok !== true || !data.tracks || data.tracks.length === undefined) return out
   out.ok = true
   out.index = numberOr(data.index, 0)
-  for (var i = 0; i < data.tracks.length; i++) {
+  for (var i = 0; i < data.tracks.length && out.tracks.length < MAX_LIST_ITEMS; i++) {
     var t = data.tracks[i]
     if (!t) continue
     out.tracks.push({
-      title: String(t.title || ""),
-      artist: String(t.artist || ""),
-      album: String(t.album || ""),
+      title: clampText(t.title, MAX_TEXT_CHARS),
+      artist: clampText(t.artist, MAX_TEXT_CHARS),
+      album: clampText(t.album, MAX_TEXT_CHARS),
       durationSec: numberOr(t.duration_secs, 0),
       isStream: t.stream === true
     })
@@ -361,6 +392,8 @@ function isSupportedOutputRate(rate) {
 // {"ok":true,"visualizer":"Bars","bands":[0.93,0.81,...]}
 function parseBands(raw) {
   var out = []
+  // A spectrum frame is tens of bytes; anything big is not a spectrum frame.
+  if (String(raw || "").length > 4096) return out
   var text = String(raw || "").trim()
   if (text.length === 0) return out
   var data = null
@@ -370,7 +403,7 @@ function parseBands(raw) {
     return out
   }
   if (!data || data.ok !== true || !data.bands || data.bands.length === undefined) return out
-  for (var i = 0; i < data.bands.length; i++) {
+  for (var i = 0; i < data.bands.length && out.length < MAX_BAND_COUNT; i++) {
     var v = numberOr(data.bands[i], 0)
     out.push(v < 0 ? 0 : (v > 1 ? 1 : v))
   }
@@ -426,6 +459,7 @@ function fuzzyFilter(rows, query) {
 //  {"kind":"song","id":"a9F..","name":"One More Time","artist":"Daft Punk","album":"Discovery","duration":320}]
 function parseResults(raw) {
   var out = []
+  if (frameTooLarge(raw)) return out
   var text = String(raw || "").trim()
   if (text.length === 0) return out
   var data = null
@@ -436,16 +470,17 @@ function parseResults(raw) {
   }
   if (!data || data.length === undefined) return out
   var kinds = { song: true, album: true, artist: true, radio: true, albumsong: true }
-  for (var i = 0; i < data.length; i++) {
+  for (var i = 0; i < data.length && out.length < MAX_LIST_ITEMS; i++) {
     var a = data[i]
     if (!a || !a.id) continue
     out.push({
       kind: kinds[a.kind] ? String(a.kind) : "album",
-      id: String(a.id),
-      name: String(a.name || ""),
-      artist: String(a.artist || ""),
-      album: String(a.album || ""),
-      albumId: String(a.albumId || ""),
+      // A radio row's id IS its stream URL, so ids get the path budget.
+      id: clampText(a.id, MAX_PATH_CHARS),
+      name: clampText(a.name, MAX_TEXT_CHARS),
+      artist: clampText(a.artist, MAX_TEXT_CHARS),
+      album: clampText(a.album, MAX_TEXT_CHARS),
+      albumId: clampText(a.albumId, MAX_PATH_CHARS),
       songCount: numberOr(a.songCount, 0),
       duration: numberOr(a.duration, 0)
     })
@@ -491,6 +526,7 @@ function providerQuery(query) {
 // {"ok":true,"providers":[{"id":"radio","name":"Radio"},{"id":"local","name":"Local"}]}
 function parseProviders(raw) {
   var out = []
+  if (frameTooLarge(raw)) return out
   var data = null
   try {
     data = JSON.parse(String(raw || "").trim())
@@ -498,14 +534,14 @@ function parseProviders(raw) {
     return out
   }
   if (!data || data.ok !== true || !data.providers || data.providers.length === undefined) return out
-  for (var i = 0; i < data.providers.length; i++) {
+  for (var i = 0; i < data.providers.length && out.length < MAX_LIST_ITEMS; i++) {
     var p = data.providers[i]
     if (!p) continue
-    var name = String(p.name || p.id || "")
+    var name = clampText(p.name || p.id, MAX_TEXT_CHARS)
     if (name.length === 0) continue
     out.push({
       kind: "provider",
-      id: String(p.id || name.toLowerCase()),
+      id: clampText(p.id || name.toLowerCase(), MAX_TEXT_CHARS),
       name: name,
       artist: "", album: "", albumId: "", songCount: 0, duration: 0
     })
@@ -519,6 +555,7 @@ function parseProviders(raw) {
 // l: rows are radios.toml stations (l:0 the built-in list), f: rows favorites.
 function parseStations(raw) {
   var out = []
+  if (frameTooLarge(raw)) return out
   var data = null
   try {
     data = JSON.parse(String(raw || "").trim())
@@ -526,13 +563,13 @@ function parseStations(raw) {
     return out
   }
   if (!data || data.ok !== true || !data.playlists || data.playlists.length === undefined) return out
-  for (var i = 0; i < data.playlists.length; i++) {
+  for (var i = 0; i < data.playlists.length && out.length < MAX_LIST_ITEMS; i++) {
     var p = data.playlists[i]
     if (!p || !p.id) continue
     out.push({
       kind: "station",
-      id: String(p.id),
-      name: String(p.name || ""),
+      id: clampText(p.id, MAX_PATH_CHARS),
+      name: clampText(p.name, MAX_TEXT_CHARS),
       artist: "", album: "", albumId: "", songCount: 0, duration: 0
     })
   }

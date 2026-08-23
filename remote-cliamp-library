@@ -26,13 +26,27 @@ carries a Subsonic token, no ssh probe is needed at all.
 """
 
 import json
+import re
 import subprocess
 import sys
+import threading
 import urllib.parse
 import urllib.request
 
 AUTH_FIELDS = ("u", "t", "s", "c", "v")
 TIMEOUT_SEC = 8
+
+# Trust-boundary limits, mirroring Model.js: the remote box, the Subsonic
+# server and the radio directory are all peers whose replies must be bounded
+# before this process buffers them — and before QML buffers this process.
+MAX_OUTPUT_BYTES = 1 << 20   # any subprocess stdout or HTTP body
+MAX_ROWS = 1000              # rows in any JSON answer or delivered playlist
+
+# The ssh target and the remote cliamp path come in as argv from the panel;
+# both also pass through a whitelist there. Enforced again here so the helper
+# is safe to call from anything else too: no leading "-", no shell syntax.
+TARGET_RE = re.compile(r"^[A-Za-z0-9_.@%-]{1,256}$")
+CLIAMP_RE = re.compile(r"^[A-Za-z0-9_./~-]{1,512}$")
 
 # Overwritten on every play. Same reserved name as the local plugin, so the row
 # filter in Model.js hides it in both.
@@ -45,7 +59,10 @@ CTL_PATH = ""
 
 def ssh(target, remote_line, stdin_text=None):
     """Run a shell line on the target. target "local" runs it right here — the
-    playlist writes, status probes and loads are the same lines either way."""
+    playlist writes, status probes and loads are the same lines either way.
+    stdout is read incrementally and capped: a hostile peer must not be able to
+    balloon this process (or the shell that collects its stdout) with one
+    endless reply."""
     if target == "local":
         argv = ["bash", "-c", remote_line]
     else:
@@ -54,18 +71,53 @@ def ssh(target, remote_line, stdin_text=None):
             opts += ["-o", "ControlMaster=auto",
                      "-o", "ControlPath=" + CTL_PATH,
                      "-o", "ControlPersist=60"]
-        argv = ["ssh", *opts, target, remote_line]
+        # "--" ends option parsing: the target can never read as an ssh option.
+        argv = ["ssh", *opts, "--", target, remote_line]
     try:
-        out = subprocess.run(
-            argv, capture_output=True, text=True, timeout=20, input=stdin_text,
+        proc = subprocess.Popen(
+            argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
+            text=True,
         )
-        return out.stdout
+        watchdog = threading.Timer(20, proc.kill)
+        watchdog.start()
+        try:
+            if stdin_text is not None:
+                try:
+                    proc.stdin.write(stdin_text)
+                    proc.stdin.close()
+                except Exception:
+                    pass
+            chunks = []
+            total = 0
+            while True:
+                piece = proc.stdout.read(65536)
+                if not piece:
+                    break
+                total += len(piece)
+                if total > MAX_OUTPUT_BYTES:
+                    proc.kill()
+                    return ""
+                chunks.append(piece)
+            proc.wait()
+            return "".join(chunks)
+        finally:
+            watchdog.cancel()
     except Exception:
         return ""
 
 
 def sh_quote(value):
     return "'" + str(value).replace("'", "'\\''") + "'"
+
+
+def read_limited(response):
+    """Read at most MAX_OUTPUT_BYTES from an HTTP response; anything larger is
+    not an answer this helper has any use for."""
+    body = response.read(MAX_OUTPUT_BYTES + 1)
+    if len(body) > MAX_OUTPUT_BYTES:
+        raise ValueError("response too large")
+    return body
 
 
 def current_stream_url(target, cliamp):
@@ -115,7 +167,7 @@ def call(host, auth, endpoint, **params):
     with urllib.request.urlopen(
         host + "/rest/" + endpoint + "?" + query, timeout=TIMEOUT_SEC
     ) as response:
-        body = json.loads(response.read().decode())
+        body = json.loads(read_limited(response).decode())
     return body.get("subsonic-response") or {}
 
 
@@ -227,12 +279,14 @@ def artist_songs(host, auth, artist_id):
     data = call(host, auth, "getArtist", id=artist_id)
     artist = data.get("artist") or {}
     songs = []
-    for a in artist.get("album") or []:
+    for a in (artist.get("album") or [])[:MAX_ROWS]:
+        if len(songs) >= MAX_ROWS:
+            break
         if not a.get("id"):
             continue
         album = (call(host, auth, "getAlbum", id=a["id"]).get("album") or {})
         songs.extend(s for s in (album.get("song") or []) if s.get("id"))
-    return artist, songs
+    return artist, songs[:MAX_ROWS]
 
 
 def play_artist(target, cliamp, host, auth, artist_id):
@@ -288,7 +342,7 @@ def builtin_stations():
     req = urllib.request.Request(
         BUILTIN_M3U, headers={"User-Agent": "remote-cliamp/0.2"})
     with urllib.request.urlopen(req, timeout=TIMEOUT_SEC) as response:
-        body = response.read().decode("utf-8", "replace")
+        body = read_limited(response).decode("utf-8", "replace")
     rows = []
     name = ""
     for line in body.splitlines():
@@ -298,6 +352,8 @@ def builtin_stations():
         if line.startswith("#EXTINF"):
             name = line.split(",", 1)[1].strip() if "," in line else ""
         elif not line.startswith("#"):
+            if len(rows) >= MAX_ROWS:
+                break
             rows.append({"kind": "radio", "id": line, "name": name or line, "artist": "cliamp radio"})
             name = ""
     return rows
@@ -315,9 +371,9 @@ def radio_search(query, limit=50):
         headers={"User-Agent": "remote-cliamp/0.2"},
     )
     with urllib.request.urlopen(req, timeout=TIMEOUT_SEC) as response:
-        stations = json.loads(response.read().decode())
+        stations = json.loads(read_limited(response).decode())
     rows = []
-    for s in stations:
+    for s in stations[:MAX_ROWS]:
         url = s.get("url_resolved") or s.get("url") or ""
         if not url:
             continue
@@ -387,7 +443,7 @@ def playlist_toml(album, songs, host, auth):
         str(album.get("coverArt") or album.get("id") or "")
     )
     lines = []
-    for song in songs:
+    for song in songs[:MAX_ROWS]:
         if not song.get("id"):
             continue
         stream = (
@@ -433,6 +489,12 @@ def main():
         return 2
     target, cliamp, CTL_PATH, panel_url, verb = args[:5]
     rest = args[5:]
+
+    # Same whitelist the panel applies; enforced again at this entry point.
+    if target != "local" and (not TARGET_RE.match(target) or target.startswith("-")):
+        return 2
+    if not CLIAMP_RE.match(cliamp) or cliamp.startswith("-"):
+        return 2
 
     # Radio never touches the Subsonic server, so it works with no token at all.
     if verb == "radio":

@@ -25,9 +25,32 @@ Item {
   // way at all — TUI in a terminal, daemon — owns the one per-user socket, so
   // whatever is running is what this controls.
   readonly property bool isLocal: sshTarget === "local"
+
+  // The target lands in ssh's argv and the cliamp path inside remote shell
+  // lines, so both are whitelisted rather than escaped: a value that could read
+  // as an ssh option ("-oProxyCommand=...") or as shell syntax never leaves
+  // this file. The cliamp path keeps `~` unquoted on purpose — quoting would
+  // kill the tilde expansion the default depends on — which is exactly why its
+  // charset must stay this narrow. Invalid settings fall back to defaults.
+  readonly property bool targetValid: isLocal
+    || (sshTarget.length > 0 && sshTarget.length <= 256
+        && sshTarget.charAt(0) !== "-" && /^[A-Za-z0-9_.@%-]+$/.test(sshTarget))
+
   readonly property string label: String(setting("label", "") || sshTarget || "unset")
-  readonly property string remoteSocket: String(setting("remoteSocket", ".config/cliamp/cliamp.sock"))
-  readonly property string remoteCliamp: String(setting("remoteCliamp", "~/.local/bin/cliamp"))
+
+  readonly property string remoteSocket: {
+    var raw = String(setting("remoteSocket", ".config/cliamp/cliamp.sock"))
+    return raw.length > 0 && raw.length <= 512 && raw.charAt(0) !== "-"
+        && /^[A-Za-z0-9_.\/-]+$/.test(raw)
+      ? raw : ".config/cliamp/cliamp.sock"
+  }
+
+  readonly property string remoteCliamp: {
+    var raw = String(setting("remoteCliamp", "~/.local/bin/cliamp"))
+    return raw.length > 0 && raw.length <= 512 && raw.charAt(0) !== "-"
+        && /^[A-Za-z0-9_.\/~-]+$/.test(raw)
+      ? raw : "~/.local/bin/cliamp"
+  }
   readonly property int statusIntervalMs: intSetting("statusIntervalSec", 2, 1, 10) * 1000
 
   readonly property string slug: {
@@ -53,13 +76,15 @@ Item {
   // line just runs in a shell here.
   function sshCommand(remoteLine) {
     if (isLocal) return ["bash", "-c", remoteLine]
+    // "--" ends option parsing, so the (already whitelisted) target can never
+    // be read as an ssh option even if the whitelist is somehow bypassed.
     return ["ssh", "-T",
       "-o", "BatchMode=yes",
       "-o", "ConnectTimeout=5",
       "-o", "ControlMaster=auto",
       "-o", "ControlPath=" + root.controlPath,
       "-o", "ControlPersist=60",
-      root.sshTarget, remoteLine]
+      "--", root.sshTarget, remoteLine]
   }
 
   // ---- the tunnel ----
@@ -105,7 +130,7 @@ Item {
       "-o", "ControlPath=" + root.controlPath,
       "-o", "ControlPersist=60",
       "-L", root.socketPath + ":" + root.resolvedRemoteSocket,
-      root.sshTarget]
+      "--", root.sshTarget]
     running: false
     onExited: tunnelRetry.restart()
   }
@@ -120,7 +145,7 @@ Item {
   }
 
   function startTunnel() {
-    if (isLocal || sshTarget.length === 0 || tunnelProcess.running) return
+    if (isLocal || !targetValid || tunnelProcess.running) return
     if (resolvedRemoteSocket.length === 0) {
       if (!homeProbe.running) homeProbe.running = true
       return
@@ -560,6 +585,9 @@ Item {
         splitMarker: "\n"
         onRead: function (line) {
           var raw = String(line || "")
+          // A peer can send an arbitrarily long line; drop it before any
+          // JSON.parse gets to materialize it.
+          if (raw.length > Model.MAX_FRAME_BYTES) return
           var kind = Model.messageKind(raw)
           if (kind === "providers") {
             root._providersPending = false
@@ -672,7 +700,7 @@ Item {
   Process {
     id: visProcess
     command: root.sshCommand(root.remoteCliamp + " visstream --fps 20")
-    running: root.panelOpen && root.isPlaying && root.sshTarget.length > 0
+    running: root.panelOpen && root.isPlaying && root.targetValid
     stdout: SplitParser {
       splitMarker: "\n"
       onRead: function (line) {
@@ -825,7 +853,7 @@ Item {
   }
 
   function _dispatchLibrary() {
-    if (sshTarget.length === 0) return
+    if (!targetValid) return
     // Provider mode is answered entirely over the socket.
     if (Model.isProviderMode(libraryQuery) && !browseArtist && !browseAlbum) {
       _dispatchedQuery = libraryQuery
@@ -944,8 +972,10 @@ Item {
   }
 
   function readPlaylists() {
-    if (playlistProcess.running || sshTarget.length === 0) return
-    playlistProcess.command = sshCommand(remoteCliamp + " playlist list")
+    if (playlistProcess.running || !targetValid) return
+    // head bounds the reply on the producer side, before StdioCollector
+    // buffers it here.
+    playlistProcess.command = sshCommand(remoteCliamp + " playlist list | head -c 262144")
     playlistProcess.running = true
   }
 
@@ -969,13 +999,13 @@ Item {
   // Shuffle and repeat have no documented socket verb, so they go through the CLI on
   // the server, which talks to the daemon over the same socket from its own side.
   function toggleShuffle() {
-    if (actionProcess.running || sshTarget.length === 0) return
+    if (actionProcess.running || !targetValid) return
     actionProcess.command = sshCommand(remoteCliamp + " shuffle")
     actionProcess.running = true
   }
 
   function cycleRepeat() {
-    if (actionProcess.running || sshTarget.length === 0) return
+    if (actionProcess.running || !targetValid) return
     actionProcess.command = sshCommand(remoteCliamp + " repeat")
     actionProcess.running = true
   }
@@ -984,7 +1014,7 @@ Item {
   // the server. setsid + nohup so it survives the ssh session that spawned it. Only
   // offered while nothing owns the remote socket.
   function openPlayer() {
-    if (running || sshTarget.length === 0) return
+    if (running || !targetValid) return
     Quickshell.execDetached(sshCommand(
       "setsid nohup " + remoteCliamp + " --daemon >/dev/null 2>&1 &"))
   }
