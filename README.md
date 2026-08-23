@@ -32,6 +32,32 @@ The command validates the manifest, asks where to place the widget, and the
 bar picks it up immediately. Update later with `omarchy plugin update
 orsa.remote-cliamp`.
 
+## Getting started
+
+With no configuration the widget already controls the cliamp on **this**
+machine — install it, click the bar icon, press play. Nothing else to set up.
+
+To add a remote server, open `~/.config/omarchy/shell.json` — the file the
+whole bar is configured in — and find the widget's entry in the bar layout
+(it carries `"id": "orsa.remote-cliamp"`; the id names the plugin, leave it
+as it is). Give the entry a `servers` list — the local player plus one
+machine over ssh:
+
+```json
+{
+  "id": "orsa.remote-cliamp",
+  "activeServer": "local",
+  "servers": [
+    { "label": "local", "sshTarget": "local" },
+    { "label": "livingroom", "sshTarget": "user@livingroom.lan" }
+  ]
+}
+```
+
+The shell hot-reloads the file on save; both servers appear in the panel's
+SERVER section (`o`, or the wheel on the bar icon switches). The full
+per-server reference lives in [Configuration](#configuration).
+
 ## How it reaches the server
 
 cliamp speaks newline-delimited JSON on a unix socket. The plugin holds one
@@ -121,7 +147,7 @@ trim applies.
 ## Requirements
 
 - Key-based ssh to the server that works with `BatchMode=yes` (no password prompts).
-- cliamp **>= 1.63** on the server — 1.29 has no IPC socket at all. An unprivileged
+- cliamp **>= 1.63** on the server. An unprivileged
   install works: `cp /usr/local/bin/cliamp ~/.local/bin/ && ~/.local/bin/cliamp --upgrade`.
 - Something running on the server that owns the socket: the TUI in a tmux, or
   `cliamp --daemon`. The panel's "Start cliamp daemon on server" row does the latter
@@ -129,14 +155,16 @@ trim applies.
 
 ## Configuration
 
-One entry in `shell.json`, with the servers as a list:
+Everything lives in the widget's entry in `~/.config/omarchy/shell.json`
+(see [Getting started](#getting-started) for where that is). The servers are
+a list; a fuller example with a per-server override:
 
 ```json
 {
   "id": "orsa.remote-cliamp",
-  "activeServer": "pb",
+  "activeServer": "livingroom",
   "servers": [
-    { "label": "pb", "sshTarget": "user@music-server.lan" },
+    { "label": "livingroom", "sshTarget": "user@livingroom.lan" },
     { "label": "attic", "sshTarget": "user@attic.lan",
       "remoteCliamp": "/usr/local/bin/cliamp" }
   ]
