@@ -12,13 +12,13 @@ the cliamp on localhost (a built-in `local` server, no ssh involved), so it also
 works as a plain local cliamp panel out of the box.
 
 <p align="center">
-  <img src="docs/00-panel.png" width="380" alt="The panel, playing">
   <img src="docs/01-queue.png" width="380" alt="The queue">
+  <img src="docs/05-lyrics.png" width="380" alt="The lyric sheet">
 </p>
 <p align="center">
-  <sub>More: <a href="docs/02-server-picker.png">server picker</a> ·
+  <sub>More: <a href="docs/00-panel.png">the panel, playing</a> ·
+  <a href="docs/02-server-picker.png">server picker</a> ·
   <a href="docs/03-search.png">library search</a> ·
-  <a href="docs/05-lyrics.png">lyrics</a> ·
   <a href="docs/06-sections.png">every section at once</a></sub>
 </p>
 
@@ -147,8 +147,6 @@ Where the slider points depends on where the player is:
 
 ## Lyrics
 
-<img align="right" src="docs/05-lyrics.png" width="260" alt="The LYRICS section">
-
 `y` opens the lyric sheet, the same key the native player uses. The line the
 server is on is the highlighted one and the sheet follows it, so scrolling is
 only needed to read ahead; the count in the header is how many lines were
@@ -158,8 +156,6 @@ lyrics show up late.
 The timing comes off the server's own playback clock. Nothing here can measure
 the latency of a sink in another room, so if the lines run early or late,
 `lyricTrimMs` shifts them by hand (see [Configuration](#configuration)).
-
-<br clear="right">
 
 ## Lights (LedFx)
 
