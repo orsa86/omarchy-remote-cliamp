@@ -9,7 +9,7 @@ server keeps its own tunnel and heartbeat alive so switching is instant and the 
 shows live state per server.
 
 Remote is opt-in, not required: with no configuration at all the widget drives the
-cliamp on this machine (a built-in `local` server, no ssh involved), so it also
+cliamp on localhost (a built-in `local` server, no ssh involved), so it also
 works as a plain local cliamp panel out of the box.
 
 <p align="center">
@@ -34,8 +34,8 @@ orsa.remote-cliamp`.
 
 ## Getting started
 
-With no configuration the widget already controls the cliamp on **this**
-machine — install it, click the bar icon, press play. Nothing else to set up.
+With no configuration the widget already controls the cliamp on **localhost**
+— install it, click the bar icon, press play. Nothing else to set up.
 
 To add a remote server, open `~/.config/omarchy/shell.json` — the file the
 whole bar is configured in — and find the widget's entry in the bar layout
@@ -75,7 +75,7 @@ already-open connection: ~20 ms instead of a full ~1.7 s handshake per call.
 Audio never crosses the wire. The server pulls its own streams (Navidrome, radio)
 and plays them on its own output.
 
-The library is browsed from THIS machine, straight off the Subsonic server, using the
+The library is browsed from localhost, straight off the Subsonic server, using the
 salted token the remote cliamp publishes in its status — the same trick as the local
 plugin, so no password is ever handled. Playing an album writes the `cliampui` scratch
 playlist onto the server over ssh and loads it there.
