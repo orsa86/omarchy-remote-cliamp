@@ -44,17 +44,20 @@ bar is configured in — and find the widget's entry in the bar layout (it carri
 the entry a `servers` list — the local player plus one machine over ssh — and
 optionally a `ledfxUrl` if a [LedFx](https://ledfx.app) instance runs somewhere:
 
-```json
+```jsonc
 {
-  "id": "orsa.remote-cliamp",
+  "id": "orsa.remote-cliamp",                              // fixed — names the plugin
   "activeServer": "local",
   "servers": [
-    { "label": "local", "sshTarget": "local" },
-    { "label": "livingroom", "sshTarget": "user@livingroom.lan" }
+    { "label": "local", "sshTarget": "local" },            // localhost, works with nothing else
+    { "label": "livingroom", "sshTarget": "user@livingroom.lan" }  // optional: any machine over ssh
   ],
-  "ledfxUrl": "http://lights.lan:8888"
+  "ledfxUrl": "http://lights.lan:8888"                     // optional: LedFx → LIGHTS section
 }
 ```
+
+(The comments are illustration only — `shell.json` is plain JSON, leave them
+out when pasting.)
 
 The shell hot-reloads the file on save; both servers appear in the panel's
 SERVER section (`o`, or the wheel on the bar icon switches), and the `ledfxUrl`
