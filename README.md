@@ -31,7 +31,9 @@ omarchy plugin add https://github.com/orsa86/omarchy-remote-cliamp.git
 ```
 
 The command validates the manifest, asks where to place the widget, and the bar
-picks it up immediately. Update later with `omarchy plugin update orsa.remote-cliamp`.
+picks it up immediately. Update later with `omarchy plugin update orsa.remote-cliamp`;
+remove with `omarchy plugin remove orsa.remote-cliamp` (your `shell.json` entry
+is yours — removal does not touch the rest of your bar configuration).
 
 ## Getting started
 
