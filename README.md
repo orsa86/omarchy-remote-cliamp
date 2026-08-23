@@ -72,8 +72,13 @@ queue), `a` / `q` (or right click) queue without touching what is playing — so
 whole albums, and radio stations alike, delivered as `{"cmd":"queue"}` over the
 socket.
 
-The volume slider moves cliamp's own gain over the socket, in dB ([-30, +6], the
-same range its `+`/`-` keys walk). Right click returns it to 0 dB.
+The volume slider depends on where the player is. On a remote server it moves
+cliamp's own gain over the socket, in dB ([-30, +6], the same range its `+`/`-`
+keys walk); right click returns it to 0 dB, and the line turns urgent while the
+gain sits above 0 dB — positive digital gain clips. On the `local` server the
+slider drives the PipeWire volume of cliamp's own playback stream instead
+(shown in %, capped at 100%, right click restores it): float, ramped, cannot
+clip, and the socket gain is left alone at 0.
 
 ## Lights (LedFx)
 
