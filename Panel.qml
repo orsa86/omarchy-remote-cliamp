@@ -523,9 +523,17 @@ Panel {
         else if (key === "p" && root.libraryOpen && root.cliamp.browseAlbum)
           root.cliamp.playResult({ kind: "playall", id: String(root.cliamp.browseAlbum.id), name: "" })
         // Native cliamp's volume keys: +/- walk the gain 1 dB at a time.
-        // `=` is the unshifted + on most layouts, so it counts too.
-        else if (t === "+" || t === "=") root.cliamp.setVolumeDb(root.cliamp.shownVolumeDb + 1)
-        else if (t === "-") root.cliamp.setVolumeDb(root.cliamp.shownVolumeDb - 1)
+        // `=` is the unshifted + on most layouts, so it counts too. On the
+        // local server they walk the PipeWire stream volume in 5% steps,
+        // the same control the slider drives.
+        else if (t === "+" || t === "=") {
+          if (root.cliamp.hasStreamVolume) root.cliamp.setStreamVolume(root.cliamp.streamVolume + 0.05)
+          else root.cliamp.setVolumeDb(root.cliamp.shownVolumeDb + 1)
+        }
+        else if (t === "-") {
+          if (root.cliamp.hasStreamVolume) root.cliamp.setStreamVolume(root.cliamp.streamVolume - 0.05)
+          else root.cliamp.setVolumeDb(root.cliamp.shownVolumeDb - 1)
+        }
         // The native playlist manager's `[`/`]`: move the highlighted queue row.
         else if (root.queueOpen && (t === "[" || t === "]")) {
           var to = root.cursorIndex + (t === "]" ? 1 : -1)

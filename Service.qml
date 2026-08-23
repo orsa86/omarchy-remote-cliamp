@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import Quickshell.Services.Pipewire
 import "Model.js" as Model
 
 // A cliamp on another machine. The remote instance speaks the same newline delimited
@@ -186,10 +187,33 @@ Item {
   readonly property int total: Number(status.total || 0)
   readonly property bool isStream: status.isStream === true
 
-  // No PipeWire stream node exists for a remote player; what CAN move is cliamp's
-  // own gain, which the socket carries as dB in [-30, +6]. Held optimistically so
-  // the slider tracks the drag instead of the poll.
-  readonly property bool hasStreamVolume: false
+  // A remote player's PipeWire graph is in another room, so remote volume is
+  // cliamp's own socket gain. Locally the player's playback stream DOES sit in
+  // this machine's graph (node "alsa_playback.cliamp"), and PipeWire moves its
+  // volume in float with a ramp — no clipping, no zipper — so the local slider
+  // drives that instead. Matching stays on node.name: reading node.properties
+  // before the node is bound can destabilize the Pipewire service (see the
+  // stock audio panel's comment).
+  readonly property var _pwStreamNode: {
+    if (!isLocal || !Pipewire.nodes) return null
+    var nodes = Pipewire.nodes.values
+    for (var i = 0; i < nodes.length; i++) {
+      var n = nodes[i]
+      if (!n || !n.isStream) continue
+      if (String(n.name || "").indexOf("cliamp") !== -1) return n
+    }
+    return null
+  }
+
+  PwObjectTracker { objects: root._pwStreamNode ? [root._pwStreamNode] : [] }
+
+  readonly property bool hasStreamVolume: !!(_pwStreamNode && _pwStreamNode.audio)
+  readonly property real streamVolume: hasStreamVolume ? _pwStreamNode.audio.volume : 0
+
+  function setStreamVolume(v) {
+    if (!hasStreamVolume) return
+    _pwStreamNode.audio.volume = Math.max(0, Math.min(1, Number(v) || 0))
+  }
   readonly property real volumeDb: Number(status.volumeDb || 0)
   property real pendingVolumeDb: -999
   readonly property real shownVolumeDb: pendingVolumeDb > -900 ? pendingVolumeDb : volumeDb

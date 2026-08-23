@@ -98,11 +98,17 @@ Column {
     spacing: Style.space(2)
     visible: root.live
 
+    // Local server: the slider is cliamp's PipeWire stream volume (float,
+    // ramped, cannot clip; 100% = the samples untouched). Remote servers keep
+    // cliamp's socket gain in dB — their graph is elsewhere.
+    readonly property bool streamVol: !!(root.service && root.service.hasStreamVolume)
+
     SectionHead {
       width: parent.width
       text: "VOLUME"
       count: {
         if (!root.service) return ""
+        if (parent.streamVol) return Math.round(root.service.streamVolume * 100) + " %"
         var db = Math.round(root.service.shownVolumeDb)
         return (db > 0 ? "+" + db : String(db)) + " dB"
       }
@@ -113,16 +119,28 @@ Column {
     LineSlider {
       width: parent.width - Style.space(12)
       anchors.horizontalCenter: parent.horizontalCenter
-      minimum: -30
-      maximum: 6
-      value: root.service ? root.service.shownVolumeDb : 0
-      // Gain above 0 dB clips the samples before the DAC — a stray click on
-      // the slider's right end lands there silently, so the line turns urgent
-      // while it does.
-      foreground: root.service && root.service.shownVolumeDb > 0 ? Color.urgent : root.foreground
+      minimum: parent.streamVol ? 0 : -30
+      maximum: parent.streamVol ? 100 : 6
+      value: {
+        if (!root.service) return 0
+        return parent.streamVol ? root.service.streamVolume * 100 : root.service.shownVolumeDb
+      }
+      // Socket gain above 0 dB clips the samples before the DAC — a stray
+      // click on the slider's right end lands there silently, so the line
+      // turns urgent while it does. Stream volume tops out at 100%: no danger.
+      foreground: !parent.streamVol && root.service && root.service.shownVolumeDb > 0
+        ? Color.urgent : root.foreground
       enabled: root.live
-      onMoved: function (v) { if (root.service) root.service.setVolumeDb(v) }
-      onRightClicked: if (root.service) root.service.setVolumeDb(0)
+      onMoved: function (v) {
+        if (!root.service) return
+        if (parent.streamVol) root.service.setStreamVolume(v / 100)
+        else root.service.setVolumeDb(v)
+      }
+      onRightClicked: {
+        if (!root.service) return
+        if (parent.streamVol) root.service.setStreamVolume(1)
+        else root.service.setVolumeDb(0)
+      }
     }
   }
 }
