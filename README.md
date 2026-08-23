@@ -199,25 +199,52 @@ loads as a single server.
 
 ## Keyboard
 
-Same as the local plugin, minus what has no remote meaning: `space`/`enter`
-play-pause, `n`/`b` next and back, `h`/`l` seek (inert on streams), `s` shuffle,
-`r` repeat, `+`/`-` volume 1 dB at a time (native cliamp's keys; `=` counts as `+`),
-`/` library, `o` the server picker (`j`/`k` + enter to switch),
-`f` start the remote daemon, `?` or `Ctrl+K` the in-panel keymap (native cliamp's
-own help keys), `esc` close. No `p` (no rate following).
+The keys are cliamp's own, minus what has no remote meaning (no `p` — no rate
+following).
 
-In the search, the native two-zone flow: `/` always means "type a query" (it opens
-the library and focuses the field, or refocuses it), `esc` hands the keyboard from
-the field to the results list, a second `esc` closes the panel. Navigation matches
-cliamp's overlay: `j`/`k` or `Ctrl+N`/`Ctrl+P` move the cursor (the Ctrl pair works
-while typing too), `Ctrl+U`/`Ctrl+D` or `PageUp`/`PageDown` scroll by page,
-`Enter` plays, `a`/`q` queue the highlighted row, `Backspace` walks out of an artist
-drill-down. In the field itself: `Ctrl+W` deletes the previous word, `Ctrl+U` clears
-before the cursor — cliamp's text-input keys.
+### Panel
 
-Bar icon: bright while playing, dim while reachable and idle, dimmer still while the
-server is unreachable. Right click play-pauses without opening the panel; the wheel
-cycles through the servers.
+| Key | Action |
+| --- | --- |
+| `space` / `enter` | play-pause |
+| `n` / `b` | next / previous track |
+| `h` / `l` | seek back / forward (streams cannot seek) |
+| `s` / `r` | shuffle / cycle repeat |
+| `+` / `-` | volume — 1 dB steps remote, 5% steps local (`=` counts as `+`) |
+| `/` | library search |
+| `o` | server picker (`j`/`k` + `enter` to switch) |
+| `A` | queue |
+| `L` | lights (when `ledfxUrl` is set) |
+| `f` | start the cliamp daemon on the server |
+| `?` / `Ctrl+K` | in-panel keymap |
+| `esc` | close (open sections collapse first) |
+
+### Search
+
+The native two-zone flow: `/` always means "type a query" — it opens the
+library and focuses the field, or refocuses it.
+
+| Key | Action |
+| --- | --- |
+| `esc` | hand the keyboard from the field to the results; again closes the panel |
+| `j` / `k`, `Ctrl+N` / `Ctrl+P` | move the cursor (the Ctrl pair works while typing) |
+| `Ctrl+D` / `Ctrl+U`, `PageDown` / `PageUp` | scroll by page (in the results) |
+| `enter` | play the row (replaces the queue) |
+| `a` / `q` / right click | queue the row without touching what plays |
+| `backspace` | walk out of an artist / album drill-down |
+| `Ctrl+W` | delete the previous word (in the field) |
+| `Ctrl+U` | clear before the cursor (in the field) |
+
+### Bar icon
+
+| Input | Action |
+| --- | --- |
+| click | open / close the panel |
+| right click | play-pause without opening |
+| wheel | cycle through the servers |
+
+The icon is bright while playing, dim while reachable and idle, dimmer still
+while the server is unreachable.
 
 ## IPC
 
