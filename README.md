@@ -12,6 +12,16 @@ Remote is opt-in, not required: with no configuration at all the widget drives t
 cliamp on this machine (a built-in `local` server, no ssh involved), so it also
 works as a plain local cliamp panel out of the box.
 
+<p align="center">
+  <img src="docs/00-panel.png" width="380" alt="The panel, playing">
+  <img src="docs/01-queue.png" width="380" alt="The queue">
+</p>
+<p align="center">
+  <sub>More: <a href="docs/02-server-picker.png">server picker</a> ·
+  <a href="docs/03-search.png">library search</a> ·
+  <a href="docs/04-lights.png">lights</a></sub>
+</p>
+
 ## Install
 
 ```bash
