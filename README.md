@@ -17,7 +17,9 @@ works as a plain local cliamp panel out of the box.
 </p>
 <p align="center">
   <sub>More: <a href="docs/02-server-picker.png">server picker</a> ·
-  <a href="docs/03-search.png">library search</a></sub>
+  <a href="docs/03-search.png">library search</a> ·
+  <a href="docs/05-lyrics.png">lyrics</a> ·
+  <a href="docs/06-sections.png">every section at once</a></sub>
 </p>
 
 https://github.com/user-attachments/assets/4a53aa4f-3a55-4ff1-a7ac-a6c00007316e
@@ -143,6 +145,22 @@ Where the slider points depends on where the player is:
   (shown in %, capped at 100%, right click restores it): float, ramped, cannot
   clip, and the socket gain is left alone at 0.
 
+## Lyrics
+
+<img align="right" src="docs/05-lyrics.png" width="260" alt="The LYRICS section">
+
+`y` opens the lyric sheet, the same key the native player uses. The line the
+server is on is the highlighted one and the sheet follows it, so scrolling is
+only needed to read ahead; the count in the header is how many lines were
+found. `r` retries the lookup while the sheet is open, for the tracks whose
+lyrics show up late.
+
+The timing comes off the server's own playback clock. Nothing here can measure
+the latency of a sink in another room, so if the lines run early or late,
+`lyricTrimMs` shifts them by hand (see [Configuration](#configuration)).
+
+<br clear="right">
+
 ## Lights (LedFx)
 
 <img align="right" src="docs/04-lights.png" width="260" alt="The LIGHTS section">
@@ -245,6 +263,7 @@ following).
 | `/` | library search |
 | `o` | server picker (`j`/`k` + `enter` to switch) |
 | `A` | queue |
+| `y` | lyrics (`r` retries the lookup while it is open) |
 | `L` | lights (when `ledfxUrl` is set) |
 | `f` | start the cliamp daemon on the server |
 | `?` / `Ctrl+K` | in-panel keymap |
@@ -282,7 +301,7 @@ while the server is unreachable.
 ```bash
 omarchy-shell remote-cliamp open|close|toggle|playpause
 omarchy-shell remote-cliamp server <label>        # switch server
-omarchy-shell remote-cliamp library|queuepanel|serverpanel|lights
+omarchy-shell remote-cliamp library|queuepanel|serverpanel|lyrics|lights
 omarchy-shell remote-cliamp search "<query>"
 omarchy-shell remote-cliamp scene <name>          # run a LedFx scene
 ```
