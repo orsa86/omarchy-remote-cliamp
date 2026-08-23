@@ -176,6 +176,11 @@ Item {
   readonly property bool hasProgress: running && lengthSec > 0
   readonly property bool canSeek: hasProgress && !isStream
 
+  // Fired when a seek lands on a track cliamp cannot reposition (an HTTP
+  // stream: seeking one stops playback outright, measured on 1.63.2), so the
+  // UI can say why nothing moved instead of staying silent.
+  signal seekRefused()
+
   readonly property bool shuffle: status.shuffle === true
   readonly property string repeat: String(status.repeat || "Off")
   readonly property int total: Number(status.total || 0)
@@ -244,7 +249,10 @@ Item {
 
   // The socket seek takes a delta, not a position, measured on 1.63.2.
   function seekTo(targetSec) {
-    if (!canSeek) return
+    if (!canSeek) {
+      if (hasProgress) seekRefused()
+      return
+    }
     var target = Math.max(0, Math.min(lengthSec, Number(targetSec) || 0))
     var delta = Math.round(target - positionSec)
     positionSec = target

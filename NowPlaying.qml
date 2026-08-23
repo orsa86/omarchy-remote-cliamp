@@ -28,6 +28,24 @@ Column {
   // interactive. Radio has no duration at all and shows no bar.
   readonly property bool showProgress: !!(service && service.hasProgress)
 
+  // A refused seek (h/l or a bar click on a stream) borrows the lyric line for
+  // a moment to say why nothing moved, then hands it back.
+  property bool noSeekFlash: false
+
+  Timer {
+    id: noSeekFlashTimer
+    interval: 1600
+    onTriggered: root.noSeekFlash = false
+  }
+
+  Connections {
+    target: root.service
+    function onSeekRefused() {
+      root.noSeekFlash = true
+      noSeekFlashTimer.restart()
+    }
+  }
+
   readonly property string metaLine: {
     if (!service) return ""
     var artist = String(service.artist || "")
@@ -189,7 +207,8 @@ Column {
         text: root.offline
           ? "offline — " + (root.service ? root.service.sshTarget : "")
           : root.hasTrack
-            ? (root.service.activeLyric.length > 0 ? root.service.activeLyric
+            ? (root.noSeekFlash ? "stream · no seek"
+               : root.service.activeLyric.length > 0 ? root.service.activeLyric
                : root.isStream && !root.showProgress && root.running ? "stream · no seek" : "")
             : root.phrase
         color: root.offline ? Color.urgent : root.dim
@@ -229,8 +248,8 @@ Column {
         anchors.topMargin: -Style.space(8)
         anchors.bottomMargin: -Style.space(8)
         hoverEnabled: true
-        enabled: root.seekable
-        cursorShape: Qt.PointingHandCursor
+        enabled: root.showProgress
+        cursorShape: root.seekable ? Qt.PointingHandCursor : Qt.ArrowCursor
         onClicked: function (mouse) {
           if (!root.service || root.service.lengthSec <= 0) return
           root.service.seekTo(root.service.lengthSec * (mouse.x / width))
