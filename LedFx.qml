@@ -29,6 +29,12 @@ QtObject {
     var xhr = new XMLHttpRequest()
     xhr.timeout = 4000
     xhr.onreadystatechange = function () {
+      // Cut an oversized reply off while it is still streaming in, instead of
+      // letting Qt materialize all of it and checking afterwards.
+      if (xhr.readyState === XMLHttpRequest.LOADING) {
+        if (String(xhr.responseText || "").length > root.maxResponseChars) xhr.abort()
+        return
+      }
       if (xhr.readyState !== XMLHttpRequest.DONE) return
       var ok = xhr.status >= 200 && xhr.status < 300
       root.reachable = ok || root.reachable && xhr.status !== 0

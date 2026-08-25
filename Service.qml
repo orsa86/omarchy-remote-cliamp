@@ -87,6 +87,15 @@ Item {
       "--", root.sshTarget, remoteLine]
   }
 
+  // A remote `head -c` bounds only a well-behaved server — the far side of an
+  // ssh channel chooses what it actually streams back. This caps the bytes on
+  // this side of the channel, and head exiting SIGPIPEs the producer, so a
+  // hostile server can neither grow the StdioCollector nor keep the channel
+  // busy past the cap. maxBytes is always one of our own numeric constants.
+  function cappedCommand(argv, maxBytes) {
+    return ["bash", "-c", '"$@" | head -c ' + Number(maxBytes), "--"].concat(argv)
+  }
+
   // ---- the tunnel ----
 
   // sshd resolves a forwarded unix socket path as absolute only, so a relative
@@ -99,9 +108,9 @@ Item {
 
   Process {
     id: homeProbe
-    // head -c bounds the reply on the producer side: StdioCollector would
-    // otherwise buffer whatever a hostile server printed, without limit.
-    command: root.sshCommand('printf %s "$HOME" | head -c 4096')
+    // Capped locally: StdioCollector would otherwise buffer whatever a hostile
+    // server printed, without limit.
+    command: root.cappedCommand(root.sshCommand('printf %s "$HOME"'), 4096)
     running: false
     stdout: StdioCollector {
       waitForEnd: true
@@ -999,9 +1008,9 @@ Item {
 
   function readPlaylists() {
     if (playlistProcess.running || !targetValid) return
-    // head bounds the reply on the producer side, before StdioCollector
-    // buffers it here.
-    playlistProcess.command = sshCommand(remoteCliamp + " playlist list | head -c 262144")
+    // The remote head trims an honest server's reply before it crosses the
+    // wire; cappedCommand enforces the same bound locally for a hostile one.
+    playlistProcess.command = cappedCommand(sshCommand(remoteCliamp + " playlist list | head -c 262144"), 262144)
     playlistProcess.running = true
   }
 

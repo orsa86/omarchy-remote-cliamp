@@ -60,11 +60,16 @@ function createLineAssembler(maxBytes) {
           this.buffer += text
           return lines
         }
-        var line = this.buffer + text.slice(0, nl)
-        this.buffer = ""
+        // Length check before the concat, so an oversized line is dropped
+        // without ever being materialized as one string.
+        if (this.buffer.length + nl > maxBytes) {
+          this.buffer = ""
+          this.overflows++
+        } else {
+          lines.push(this.buffer + text.slice(0, nl))
+          this.buffer = ""
+        }
         text = text.slice(nl + 1)
-        if (line.length > maxBytes) this.overflows++
-        else lines.push(line)
       }
       return lines
     }
