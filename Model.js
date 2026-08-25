@@ -14,6 +14,7 @@ var MAX_LIST_ITEMS = 1000       // rows kept from any list reply
 var MAX_TEXT_CHARS = 512        // any display string (title, artist, name, ...)
 var MAX_PATH_CHARS = 8192       // URLs and paths
 var MAX_BAND_COUNT = 32         // spectrum frame
+var MAX_VIS_FRAME_BYTES = 4096  // one visualizer NDJSON frame
 
 function frameTooLarge(raw) {
   return String(raw || "").length > MAX_FRAME_BYTES
@@ -22,6 +23,52 @@ function frameTooLarge(raw) {
 function clampText(value, max) {
   var s = String(value || "")
   return s.length > max ? s.slice(0, max) : s
+}
+
+// Streaming line assembler with a hard retained-byte ceiling. SplitParser's own
+// newline mode retains an unterminated line without any cap, so the streams from
+// the far side of a trust boundary use splitMarker "" (raw chunks, nothing
+// retained) and reassemble lines here instead. A partial line that outgrows
+// maxBytes is thrown away and the stream skips forward to the next newline, so
+// an unterminated flood holds at most maxBytes plus one in-flight chunk.
+// A chunk boundary can split a multi-byte UTF-8 character; the garbled line then
+// fails JSON.parse and is dropped — cliamp writes whole lines per write, so in
+// practice chunks align with messages.
+function createLineAssembler(maxBytes) {
+  return {
+    buffer: "",
+    skipping: false,
+    overflows: 0,
+    feed: function (chunk) {
+      var text = String(chunk || "")
+      var lines = []
+      while (text.length > 0) {
+        var nl = text.indexOf("\n")
+        if (this.skipping) {
+          if (nl === -1) return lines
+          this.skipping = false
+          text = text.slice(nl + 1)
+          continue
+        }
+        if (nl === -1) {
+          if (this.buffer.length + text.length > maxBytes) {
+            this.buffer = ""
+            this.skipping = true
+            this.overflows++
+            return lines
+          }
+          this.buffer += text
+          return lines
+        }
+        var line = this.buffer + text.slice(0, nl)
+        this.buffer = ""
+        text = text.slice(nl + 1)
+        if (line.length > maxBytes) this.overflows++
+        else lines.push(line)
+      }
+      return lines
+    }
+  }
 }
 
 var SECONDS_PER_MINUTE = 60
@@ -393,7 +440,7 @@ function isSupportedOutputRate(rate) {
 function parseBands(raw) {
   var out = []
   // A spectrum frame is tens of bytes; anything big is not a spectrum frame.
-  if (String(raw || "").length > 4096) return out
+  if (String(raw || "").length > MAX_VIS_FRAME_BYTES) return out
   var text = String(raw || "").trim()
   if (text.length === 0) return out
   var data = null

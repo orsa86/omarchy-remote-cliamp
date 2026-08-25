@@ -99,7 +99,9 @@ Item {
 
   Process {
     id: homeProbe
-    command: root.sshCommand('printf %s "$HOME"')
+    // head -c bounds the reply on the producer side: StdioCollector would
+    // otherwise buffer whatever a hostile server printed, without limit.
+    command: root.sshCommand('printf %s "$HOME" | head -c 4096')
     running: false
     stdout: StdioCollector {
       waitForEnd: true
@@ -573,8 +575,17 @@ Item {
     id: ipcLoader
     active: true
     sourceComponent: Socket {
+      id: ipcSocket
       path: root.socketPath
       connected: true
+
+      // SplitParser's newline mode retains an unterminated line with no cap, so
+      // a peer could grow that buffer forever without ever completing a line.
+      // splitMarker "" hands over raw chunks instead — SplitParser retains
+      // nothing — and this assembler reassembles lines under a hard byte
+      // ceiling, dropping oversized ones and resyncing at the next newline.
+      // Fresh per Socket instantiation, so a reconnect never inherits state.
+      property var lineAssembler: Model.createLineAssembler(Model.MAX_FRAME_BYTES)
 
       onConnectionStateChanged: {
         if (connected) { root.refreshStatus(); return }
@@ -582,11 +593,17 @@ Item {
       }
 
       parser: SplitParser {
-        splitMarker: "\n"
-        onRead: function (line) {
+        splitMarker: ""
+        onRead: function (chunk) {
+          var lines = ipcSocket.lineAssembler.feed(chunk)
+          for (var li = 0; li < lines.length; li++) ipcSocket.handleLine(lines[li])
+        }
+      }
+
+      function handleLine(line) {
           var raw = String(line || "")
-          // A peer can send an arbitrarily long line; drop it before any
-          // JSON.parse gets to materialize it.
+          // The assembler already dropped anything this big, but keep the guard
+          // in front of JSON.parse anyway.
           if (raw.length > Model.MAX_FRAME_BYTES) return
           var kind = Model.messageKind(raw)
           if (kind === "providers") {
@@ -636,7 +653,6 @@ Item {
           root.status = parsed
           root.lastError = parsed.ok ? "" : parsed.lastError
           if (parsed.ok) { root.positionSec = Number(parsed.positionSec || 0); freshTimer.restart() }
-        }
       }
     }
   }
@@ -701,14 +717,24 @@ Item {
     id: visProcess
     command: root.sshCommand(root.remoteCliamp + " visstream --fps 20")
     running: root.panelOpen && root.isPlaying && root.targetValid
+    // Same unbounded-retention hazard as the socket parser: newline mode would
+    // buffer an unterminated line forever. Raw chunks plus a capped assembler.
+    property var lineAssembler: Model.createLineAssembler(Model.MAX_VIS_FRAME_BYTES)
     stdout: SplitParser {
-      splitMarker: "\n"
-      onRead: function (line) {
-        var frame = Model.parseBands(line)
-        if (frame.length > 0) root.bands = frame
+      splitMarker: ""
+      onRead: function (chunk) {
+        var lines = visProcess.lineAssembler.feed(chunk)
+        for (var li = 0; li < lines.length; li++) {
+          var frame = Model.parseBands(lines[li])
+          if (frame.length > 0) root.bands = frame
+        }
       }
     }
-    onRunningChanged: if (!running) root.bands = []
+    onRunningChanged: {
+      if (!running) root.bands = []
+      // One stream, one assembler: never carry half a line into the next run.
+      lineAssembler = Model.createLineAssembler(Model.MAX_VIS_FRAME_BYTES)
+    }
   }
 
   onPanelOpenChanged: {

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Model.js has no exports on purpose — it is a QML .js library — so the tests
+# run as one concatenated script: Model.js first, assertions after.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+if command -v deno >/dev/null 2>&1; then
+  cat Model.js tests/model_test.js | deno run -
+elif command -v node >/dev/null 2>&1; then
+  cat Model.js tests/model_test.js | node
+else
+  echo "tests/run: need deno or node" >&2
+  exit 1
+fi
