@@ -47,7 +47,7 @@ Panel {
       sshTarget: target,
       remoteSocket: String(cfg.remoteSocket || ".config/cliamp/cliamp.sock"),
       // Locally cliamp sits on PATH; the user-writable install path is a
-      // workaround for servers without passwordless sudo.
+      // workaround for servers where system paths are not user-writable.
       remoteCliamp: String(cfg.remoteCliamp || (target === "local" ? "cliamp" : "~/.local/bin/cliamp")),
       statusIntervalSec: setting("statusIntervalSec", 2),
       lyricTrimMs: setting("lyricTrimMs", 0)

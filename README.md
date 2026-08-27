@@ -98,7 +98,7 @@ cliamp --version               # >= 1.63 (older ones have no IPC socket)
 cliamp --daemon                # or run the TUI in a tmux — either owns the socket
 ```
 
-No sudo on the server? An unprivileged upgrade works:
+No root access on the server? An unprivileged upgrade works:
 `cp /usr/local/bin/cliamp ~/.local/bin/ && ~/.local/bin/cliamp --upgrade`.
 
 Nothing has to be running up front: when the socket is free, the panel's
