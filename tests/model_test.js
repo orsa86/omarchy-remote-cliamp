@@ -80,3 +80,51 @@ function assert(cond, label) {
 console.log(checks + " checks, " + failures + " failures")
 if (failures > 0) throw new Error(failures + " test failures")
 console.log("OK")
+
+// ---- YouTube mode ("yt:") ----
+
+;(function () {
+  assert(isYtMode("yt: metallica") === true, "yt: prefix detected")
+  assert(isYtMode("YouTube: x") === true, "youtube: prefix, any case")
+  assert(isYtMode(":yt x") === true, ":yt typo tolerated")
+  assert(isYtMode("yt") === false, "bare yt without colon is a library query")
+  assert(isYtMode("r: yt") === false, "radio query mentioning yt stays radio")
+  assert(ytQuery("yt:  nothing else matters ") === "nothing else matters", "yt query trimmed")
+  assert(ytQuery("youtube:enter sandman") === "enter sandman", "youtube: query stripped")
+  assert(ytQuery("yt:") === "", "bare prefix is an empty query")
+  assert(isRadioMode("yt: radio") === false, "yt mode is not radio mode")
+})()
+
+// A yt row from the helper keeps its kind and its page URL as the id.
+;(function () {
+  var rows = parseResults(JSON.stringify([
+    { kind: "yt", id: "https://www.youtube.com/watch?v=abc123", name: "Song", artist: "Uploader", duration: 245 },
+    { kind: "yt", id: "", name: "no url" }
+  ]))
+  assert(rows.length === 1, "row without an id dropped")
+  assert(rows[0].kind === "yt", "yt kind preserved")
+  assert(rows[0].id === "https://www.youtube.com/watch?v=abc123", "page URL kept as id")
+  assert(rows[0].duration === 245, "duration carried")
+})()
+
+// ---- YouTube playlist mode ("ytp:") ----
+
+;(function () {
+  assert(isYtListMode("ytp: black album") === true, "ytp: prefix detected")
+  assert(isYtListMode(":ytp x") === true, ":ytp typo tolerated")
+  assert(isYtListMode("yt: black album") === false, "yt: is not playlist mode")
+  assert(isYtMode("ytp: black album") === false, "ytp: is not video mode")
+  assert(ytListQuery("ytp:  black album ") === "black album", "ytp query trimmed")
+  assert(ytListQuery("ytp:") === "", "bare ytp: is empty")
+  var rows = parseResults(JSON.stringify([
+    { kind: "ytplaylist", id: "https://www.youtube.com/playlist?list=PLx", name: "Black Album", artist: "someone", songCount: 12 }
+  ]))
+  assert(rows.length === 1 && rows[0].kind === "ytplaylist", "ytplaylist kind preserved")
+  assert(rows[0].songCount === 12, "playlist count carried")
+})()
+
+// An info row from the helper (e.g. "yt-dlp missing…") survives parseResults as an inert row.
+;(function () {
+  var rows = parseResults(JSON.stringify([{ kind: "info", id: "!", name: "yt-dlp missing on this machine and on host" }]))
+  assert(rows.length === 1 && rows[0].kind === "info", "info kind preserved")
+})()

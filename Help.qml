@@ -50,6 +50,8 @@ Column {
       ["<text>", "library, fuzzy matched"],
       ["r:", "server's radio stations"],
       ["r: <query>", "Radio Browser search"],
+      ["yt: <query>", "YouTube (yt-dlp on server)"],
+      ["ytp: <query>", "YouTube playlists / full albums"],
       ["p:", "cliamp sources (spotify, …)"],
       ["ctrl+w · ctrl+u", "delete word · clear line"]
     ]},

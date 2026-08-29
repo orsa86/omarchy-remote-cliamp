@@ -777,10 +777,13 @@ Item {
   // version of the native provider browser. A new search always climbs back out.
   property var browseArtist: null
   property var browseAlbum: null
+  // A YouTube playlist opened from a "ytp:" result: its tracks, one level deep.
+  property var browseYtList: null
   readonly property string breadcrumb: {
     var parts = []
     if (browseArtist) parts.push(String(browseArtist.name || ""))
     if (browseAlbum) parts.push(String(browseAlbum.name || ""))
+    if (browseYtList) parts.push(String(browseYtList.name || ""))
     return parts.join(" / ")
   }
 
@@ -789,6 +792,13 @@ Item {
   }
 
   function _recomputeResults() {
+    if (browseYtList) {
+      results = [
+        _row("back", "", "‹ " + String(browseYtList.name || "")),
+        _row("ytplayall", browseYtList.id, "▶ Play the whole playlist")
+      ].concat(_libraryRows)
+      return
+    }
     if (browseAlbum) {
       // The native track screen: Enter on a row plays from it; `p` there is "play
       // all from the top", which is this screen's own first row.
@@ -823,6 +833,20 @@ Item {
         : stations.concat(_libraryRows)
       return
     }
+    if (Model.isYtMode(libraryQuery) || Model.isYtListMode(libraryQuery)) {
+      // Whatever yt-dlp on the server answered for the last settled query; while
+      // the next one is still being typed the old rows stay, re-ranked. A yt-dlp
+      // run is seconds (a slow ARM box: six or more), so an owed reply says so
+      // instead of leaving "nothing matched" on screen the whole wait.
+      var ytq = Model.isYtListMode(libraryQuery) ? Model.ytListQuery(libraryQuery) : Model.ytQuery(libraryQuery)
+      var rows = ytq.length > 0 && _dispatchedQuery !== libraryQuery
+        ? Model.fuzzyFilter(_libraryRows, ytq)
+        : _libraryRows
+      if (rows.length === 0 && ytq.length > 0 && (_ytPending || _dispatchedQuery !== libraryQuery))
+        rows = [_row("info", "", "searching YouTube on " + String(label || sshTarget) + " …")]
+      results = rows
+      return
+    }
     var rows = _libraryRows
     // While the server round trip is in flight the rows on screen answer the OLD
     // query, so they are re-ranked fuzzily against the new one instead of sitting
@@ -836,6 +860,50 @@ Item {
 
   function readLibrary() { _dispatchLibrary() }
 
+  // A YouTube search is a yt-dlp run on the server, seconds each, so it waits
+  // for the typing to pause instead of firing per keystroke like the local
+  // Subsonic search can afford to.
+  Timer {
+    id: ytDebounce
+    interval: 500
+    repeat: false
+    onTriggered: root._dispatchYt()
+  }
+
+  // Set while a yt-dlp run owes the rows on screen.
+  property bool _ytPending: false
+
+  function _dispatchYt() {
+    if (!targetValid) return
+    var lists = Model.isYtListMode(libraryQuery)
+    if (!lists && !Model.isYtMode(libraryQuery)) return
+    var query = lists ? Model.ytListQuery(libraryQuery) : Model.ytQuery(libraryQuery)
+    if (query.length === 0) {
+      _dispatchedQuery = libraryQuery
+      _libraryRows = []
+      _recomputeResults()
+      return
+    }
+    if (albumProcess.running) {
+      // A yt-dlp run for a query nobody wants any more is seconds of waiting
+      // for nothing: kill it, and its exit re-dispatches the current query.
+      if (_ytPending && _dispatchedQuery !== libraryQuery) albumProcess.running = false
+      return
+    }
+    _dispatchedQuery = libraryQuery
+    _ytPending = true
+    albumProcess.command = _helperBase().concat([lists ? "yt-playlists" : "yt", query])
+    albumProcess.running = true
+    _recomputeResults()
+  }
+
+  function enterYtList(item) {
+    browseYtList = { id: String(item.id), name: String(item.name || "") }
+    _libraryRows = []
+    _recomputeResults()
+    _dispatchLibrary()
+  }
+
   function search(query) {
     var next = String(query || "")
     // Leaving provider mode (or changing the prefix) climbs out of a drill-down.
@@ -843,6 +911,7 @@ Item {
     libraryQuery = next
     browseArtist = null
     browseAlbum = null
+    browseYtList = null
     _recomputeResults()
     _dispatchLibrary()
   }
@@ -865,7 +934,8 @@ Item {
   // One level at a time: tracks → the artist's albums (when there is one) → search.
   function goBack() {
     if (browseProvider) { browseProvider = null; _recomputeResults(); return }
-    if (browseAlbum) browseAlbum = null
+    if (browseYtList) browseYtList = null
+    else if (browseAlbum) browseAlbum = null
     else if (browseArtist) browseArtist = null
     else return
     _libraryRows = []
@@ -889,6 +959,18 @@ Item {
 
   function _dispatchLibrary() {
     if (!targetValid) return
+    if (browseYtList) {
+      // One playlist's tracks; a click, not typing, so no debounce needed.
+      if (albumProcess.running) return
+      _dispatchedQuery = libraryQuery
+      albumProcess.command = _helperBase().concat(["yt-tracks", String(browseYtList.id)])
+      albumProcess.running = true
+      return
+    }
+    if ((Model.isYtMode(libraryQuery) || Model.isYtListMode(libraryQuery)) && !browseArtist && !browseAlbum) {
+      ytDebounce.restart()
+      return
+    }
     // Provider mode is answered entirely over the socket.
     if (Model.isProviderMode(libraryQuery) && !browseArtist && !browseAlbum) {
       _dispatchedQuery = libraryQuery
@@ -927,9 +1009,11 @@ Item {
   function playResult(item) {
     if (!item) return
     if (item.kind === "back") { goBack(); return }
+    if (item.kind === "info") return
     if (item.kind === "station") { playStation(item); return }
     if (item.kind === "provider") { enterProvider(item); return }
     if (item.kind === "provplaylist") { playProviderPlaylist(item); return }
+    if (item.kind === "ytplaylist") { enterYtList(item); return }
     if (item.kind === "artist") { enterArtist(item); return }
     // The native browser's Enter on an album opens its tracks; playing the whole
     // thing is the track screen's own "from the top" row.
@@ -938,6 +1022,12 @@ Item {
     if (albumPlayProcess.running || !item.id) return
     albumPlayProcess.command = item.kind === "radio"
       ? _helperBase().concat(["play-radio", String(item.id), String(item.name || "")])
+      : item.kind === "yt"
+        // A YouTube row is a page URL; the server's yt-dlp resolves the audio when
+        // cliamp plays it, so this is the radio path with a title and an uploader.
+        ? _helperBase().concat(["play-yt", String(item.id), String(item.name || ""), String(item.artist || "")])
+      : item.kind === "ytplayall"
+        ? _helperBase().concat(["play-yt-list", String(item.id), String(browseYtList ? browseYtList.name || "" : "")])
       : item.kind === "artistplay"
         ? _helperBase().concat(["play-artist", String(item.id)])
         : item.kind === "playall"
@@ -953,15 +1043,27 @@ Item {
   // is playing. The socket queue verb takes a path, so a radio row queues directly
   // and albums/songs resolve their stream URLs through the helper first.
   function queueResult(item) {
-    if (!item) return
+    if (!item || item.kind === "info") return
     if (item.kind === "station") { queueStation(item); return }
     if (item.kind === "provplaylist") { queueProviderPlaylist(item); return }
     if (item.kind === "radio") {
       if (send('{"cmd":"queue","path":' + JSON.stringify(String(item.id)) + '}')) settleTimer.restart()
       return
     }
+    if (item.kind === "yt") {
+      // track.queue carries the title and uploader along; the bare queue verb
+      // would name the row "watch", the last path segment of the page URL. Its
+      // reply is a queue list, which the router already accepts as one.
+      if (_stationQueuePending.length > 0) return
+      var track = { path: String(item.id), title: String(item.name || ""),
+                    artist: String(item.artist || ""), stream: true }
+      if (item.duration > 0) track.duration_secs = Number(item.duration)
+      if (send('{"cmd":"track.queue","track":' + JSON.stringify(track) + '}')) settleTimer.restart()
+      return
+    }
     var verbByKind = { song: "url-song", albumsong: "url-song", album: "urls",
-                       playall: "urls", artist: "urls-artist", artistplay: "urls-artist" }
+                       playall: "urls", artist: "urls-artist", artistplay: "urls-artist",
+                       ytplaylist: "urls-yt", ytplayall: "urls-yt" }
     var verb = verbByKind[item.kind]
     if (!verb) return
     if (queueProcess.running || !item.id) return
@@ -980,7 +1082,16 @@ Item {
         if (!rows || rows.length === undefined) rows = []
         for (var i = 0; i < rows.length; i++) {
           var path = rows[i] ? String(rows[i].path || "") : ""
-          if (path.length > 0) root.send('{"cmd":"queue","path":' + JSON.stringify(path) + '}')
+          if (path.length === 0) continue
+          if (rows[i].kind === "yt") {
+            // Page URLs carry no tags cliamp could read; hand it the title too.
+            var track = { path: path, title: String(rows[i].title || ""),
+                          artist: String(rows[i].artist || ""), stream: true }
+            if (Number(rows[i].duration) > 0) track.duration_secs = Number(rows[i].duration)
+            root.send('{"cmd":"track.queue","track":' + JSON.stringify(track) + '}')
+          } else {
+            root.send('{"cmd":"queue","path":' + JSON.stringify(path) + '}')
+          }
         }
         if (rows.length > 0) settleTimer.restart()
       }
@@ -997,7 +1108,11 @@ Item {
         root._recomputeResults()
       }
     }
-    onExited: if (root._dispatchedQuery !== root.libraryQuery) root._dispatchLibrary()
+    onExited: {
+      root._ytPending = false
+      if (root._dispatchedQuery !== root.libraryQuery) root._dispatchLibrary()
+      else root._recomputeResults()
+    }
   }
 
   Process {
@@ -1050,8 +1165,10 @@ Item {
   // offered while nothing owns the remote socket.
   function openPlayer() {
     if (running || !targetValid) return
+    // ~/.local/bin first: cliamp finds yt-dlp by PATH, and a user-installed one
+    // there is how a server without root gets a current yt-dlp.
     Quickshell.execDetached(sshCommand(
-      "setsid nohup " + remoteCliamp + " --daemon >/dev/null 2>&1 &"))
+      'PATH="$HOME/.local/bin:$PATH" setsid nohup ' + remoteCliamp + " --daemon >/dev/null 2>&1 &"))
   }
 
   Process {

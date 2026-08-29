@@ -11,6 +11,11 @@ Remote is opt-in, not required: with no configuration at all the widget drives
 the cliamp on localhost (a built-in `local` server, no ssh involved), so it also
 works as a plain local cliamp panel out of the box.
 
+One search field covers the Subsonic library, the server's radio stations, the
+Radio Browser directory, every provider the server's cliamp has configured, and
+**YouTube** — videos or whole playlists — with no account and no API key: yt-dlp
+finds them here and resolves them on the server when they play.
+
 <p align="center">
   <img src="docs/01-queue.png" width="380" alt="The queue">
   <img src="docs/05-lyrics.png" width="380" alt="The lyric sheet">
@@ -98,6 +103,22 @@ cliamp --version               # >= 1.63 (older ones have no IPC socket)
 cliamp --daemon                # or run the TUI in a tmux — either owns the socket
 ```
 
+**3. yt-dlp (optional, for YouTube).** Playback of a YouTube row happens on
+the server, through the server's own `yt-dlp`, so it needs a **recent** one —
+distro packages a year old fail against today's YouTube. No root needed:
+`~/.local/bin` is looked up before `PATH`, so the official binary is enough:
+
+```bash
+# on the server — pick the asset for its CPU: yt-dlp_linux (x86_64), yt-dlp_linux_aarch64 (ARM boards)
+curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux_aarch64 \
+  -o ~/.local/bin/yt-dlp && chmod +x ~/.local/bin/yt-dlp
+```
+
+Restart the daemon afterwards (`f` in the panel starts it with `~/.local/bin`
+on its `PATH`), so playback sees the new binary too. The search itself does
+not need it: results are looked up by the `yt-dlp` on this desktop (Omarchy
+ships one) and only fall back to the server's when there is none here.
+
 No root access on the server? An unprivileged upgrade works:
 `cp /usr/local/bin/cliamp ~/.local/bin/ && ~/.local/bin/cliamp --upgrade`.
 
@@ -121,6 +142,20 @@ One field, modelled on cliamp's own Ctrl+F and `/`:
   radios.toml entries, the built-in "cliamp radio" list, and favorites.
   `r: <query>` searches the Radio Browser directory instead, the same one
   cliamp's `R` key browses.
+- **YouTube**: `yt: <query>` (or `youtube:`) lists the first ten matches —
+  the same `ytsearch` expression cliamp's own Ctrl+F falls back to, so no
+  Google account, cookies or API key are involved. `Enter` plays the row,
+  `a`/`q` queue it (title and uploader come along). The row is a page URL:
+  the server's yt-dlp resolves the audio when the track starts, so expect a
+  few seconds before sound. Plain YouTube, not YouTube Music.
+- **YouTube playlists**: `ytp: <query>` searches with YouTube's own
+  "playlist" filter — where full-album uploads live. `Enter` on a playlist
+  opens its tracks (first 50) under a "▶ Play the whole playlist" row; `a`/`q`
+  on the playlist row queues all of them; `Backspace` walks back out.
+- While a YouTube lookup is running the list says so ("searching YouTube on
+  …"); typing on discards the stale lookup and starts the new one. See
+  [Setting up a remote server](#setting-up-a-remote-server) for the yt-dlp
+  the playback side needs.
 
 Everywhere the actions are the native search-overlay set: `Enter` plays now
 (replaces the queue), `a` / `q` (or right click) queue without touching what is
@@ -185,7 +220,9 @@ every other ssh the plugin makes is a channel on the already-open connection:
 ~20 ms instead of a full ~1.7 s handshake per call.
 
 Audio never crosses the wire — the server pulls its own streams (Navidrome,
-radio) and plays them on its own output. The library is browsed from localhost,
+radio, YouTube through its own yt-dlp) and plays them on its own output. YouTube
+searches run here (yt-dlp enumerating page URLs is CPU-bound, and a small ARM
+server takes seconds per lookup) and only the URLs travel. The library is browsed from localhost,
 straight off the Subsonic server, using the salted token the remote cliamp
 publishes in its status, so no password is ever handled.
 
@@ -277,7 +314,8 @@ library and focuses the field, or refocuses it.
 | `Ctrl+D` / `Ctrl+U`, `PageDown` / `PageUp` | scroll by page (in the results) |
 | `enter` | play the row (replaces the queue) |
 | `a` / `q` / right click | queue the row without touching what plays |
-| `backspace` | walk out of an artist / album drill-down |
+| `backspace` | walk out of an artist / album / playlist drill-down |
+| `r:` `yt:` `ytp:` `p:` | prefixes: radio, YouTube, YouTube playlists, cliamp sources (see [Search](#search)) |
 | `Ctrl+W` | delete the previous word (in the field) |
 | `Ctrl+U` | clear before the cursor (in the field) |
 
@@ -298,6 +336,6 @@ while the server is unreachable.
 omarchy-shell remote-cliamp open|close|toggle|playpause
 omarchy-shell remote-cliamp server <label>        # switch server
 omarchy-shell remote-cliamp library|queuepanel|serverpanel|lyrics|lights
-omarchy-shell remote-cliamp search "<query>"
+omarchy-shell remote-cliamp search "<query>"    # prefixes work: "yt: …", "ytp: …", "r: …"
 omarchy-shell remote-cliamp scene <name>          # run a LedFx scene
 ```

@@ -51,7 +51,9 @@ Column {
 
   function kindTag(kind) {
     if (kind === "albumsong") return "song"
-    if (kind === "artistplay" || kind === "playall") return ""
+    if (kind === "ytplaylist") return "yt list"
+    if (kind === "info") return ""
+    if (kind === "artistplay" || kind === "playall" || kind === "ytplayall") return ""
     return String(kind || "")
   }
 
@@ -85,7 +87,8 @@ Column {
           if (!root.service) return ""
           var parts = root.service.breadcrumb.split(" / ")
           parts.pop()
-          return ("NAVIDROME / " + (parts.length > 0 ? parts.join(" / ") + " / " : "")).toUpperCase()
+          var rootName = root.service.browseYtList ? "YOUTUBE" : "NAVIDROME"
+          return (rootName + " / " + (parts.length > 0 ? parts.join(" / ") + " / " : "")).toUpperCase()
         }
         color: root.dim
         font.family: root.fontFamily
@@ -111,7 +114,7 @@ Column {
     TextField {
       id: search
       width: parent.width
-      placeholderText: "search · r: radio · p: sources"
+      placeholderText: "search · r: radio · yt: youtube · ytp: yt playlists · p: sources"
       foreground: root.foreground
       font.family: root.fontFamily
       font.pixelSize: Style.font.body
@@ -166,8 +169,8 @@ Column {
         required property var modelData
         required property int index
 
-        readonly property bool isAction: modelData.kind === "playall" || modelData.kind === "artistplay"
-        readonly property bool isBack: modelData.kind === "back"
+        readonly property bool isAction: modelData.kind === "playall" || modelData.kind === "artistplay" || modelData.kind === "ytplayall"
+        readonly property bool isBack: modelData.kind === "back" || modelData.kind === "info"
 
         width: albumList.width
         foreground: root.foreground

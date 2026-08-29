@@ -18,6 +18,12 @@ Verbs:
   urls <albumId> | url-song <songId>    stream URLs as JSON, for socket queueing
   radio <query>                         Radio Browser stations as JSON rows
   play-radio <url> <name>               replace the remote queue with one station
+  yt <query>                            YouTube results as JSON rows (yt-dlp on the server)
+  play-yt <url> <title> [artist]        replace the remote queue with one YouTube track
+  yt-playlists <query>                  YouTube playlists (incl. full-album uploads) as rows
+  yt-tracks <list-id|url>               one playlist's tracks as JSON rows
+  urls-yt <list-id|url>                 the same, for socket queueing
+  play-yt-list <list-id|url> <name>     replace the remote queue with a whole playlist
 
 <ctl-path> is the ssh ControlPath the plugin's tunnel already holds open, so every
 ssh here is a channel on a live connection rather than a fresh handshake.
@@ -27,6 +33,7 @@ carries a Subsonic token, no ssh probe is needed at all.
 
 import json
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -387,13 +394,174 @@ def radio_search(query, limit=50):
     return rows
 
 
-def play_radio(target, cliamp, url, name):
-    body = "\n".join([
+# YouTube search runs where the audio will play: yt-dlp on the SERVER enumerates
+# the results (--flat-playlist, no download, no login) and the same yt-dlp
+# resolves the audio when cliamp plays the row. Nothing YouTube touches this
+# machine. ytsearchN: is the expression cliamp's own Ctrl+F uses.
+YT_SEARCH_LIMIT = 10
+YT_LIST_LIMIT = 50           # tracks taken from one playlist: each is a yt-dlp resolve at play time
+YT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{6,64}$")
+YT_LIST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{10,128}$")
+# YouTube's own "Type: Playlist" search filter, the sp= value the site sends.
+YT_PLAYLIST_FILTER = "EgIQAw%253D%253D"
+YT_MISSING_MARK = "__remote_cliamp_no_ytdlp__"
+
+
+def yt_search(target, query, limit=YT_SEARCH_LIMIT):
+    return yt_track_rows(target, "ytsearch%d:%s" % (limit, query), limit)
+
+
+def yt_dlp_lines(target, url, end=0):
+    """yt-dlp --flat-playlist, one JSON object per line. No download, no login;
+    a missing yt-dlp or a failed run reads as no lines.
+
+    Enumerating results is CPU-bound in yt-dlp's own startup (four seconds on
+    a small ARM board before a single request goes out), and the answer is just
+    page URLs the server resolves itself when it plays them. So the search runs
+    HERE when this machine has a yt-dlp, and only falls back to the server's
+    when it does not. Playback always needs the server's yt-dlp regardless."""
+    args = "--flat-playlist -j --no-warnings --socket-timeout 10"
+    if end > 0:
+        args += " --playlist-end %d" % int(end)
+    line = "timeout 18 yt-dlp " + args + " -- " + sh_quote(url)
+    have_local = bool(shutil.which("yt-dlp"))
+    out = _yt_dlp_parse(ssh("local", line)) if have_local else []
+    if out:
+        return out, ""
+    if target == "local":
+        return [], "" if have_local else "yt-dlp missing on this machine"
+    # Nothing from this machine (no yt-dlp, or one too old to parse today's
+    # YouTube): the server's turn. A yt-dlp the user dropped into ~/.local/bin
+    # (no root needed) wins over a stale distro package there: non-interactive
+    # ssh has no .profile, so PATH would otherwise never see it. The marker
+    # tells "no yt-dlp" apart from "no matches".
+    raw = ssh(
+        target,
+        'PATH="$HOME/.local/bin:$PATH"; if command -v yt-dlp >/dev/null 2>&1; then '
+        + line + "; else echo " + YT_MISSING_MARK + "; fi",
+    )
+    if raw.strip() == YT_MISSING_MARK and not have_local:
+        return [], "yt-dlp missing on this machine and on " + target
+    return _yt_dlp_parse(raw), ""
+
+
+def _yt_dlp_parse(raw):
+    out = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(e, dict):
+            out.append(e)
+        if len(out) >= MAX_ROWS:
+            break
+    return out
+
+
+def info_row(text):
+    """One inert row the list shows instead of a bare "nothing matched"."""
+    return [{"kind": "info", "id": "!", "name": text, "artist": ""}]
+
+
+def yt_list_url(value):
+    """A playlist id, or any youtube URL carrying list=, normalised to the
+    canonical playlist page; empty when it is neither."""
+    value = str(value or "").strip()
+    if value.startswith("https://"):
+        query = urllib.parse.urlparse(value).query
+        value = (urllib.parse.parse_qs(query).get("list") or [""])[0]
+    if not YT_LIST_ID_RE.match(value):
+        return ""
+    return "https://www.youtube.com/playlist?list=" + value
+
+
+def yt_playlists(target, query):
+    url = ("https://www.youtube.com/results?search_query="
+           + urllib.parse.quote_plus(query) + "&sp=" + YT_PLAYLIST_FILTER)
+    entries, err = yt_dlp_lines(target, url, YT_SEARCH_LIMIT)
+    if err:
+        return info_row(err)
+    rows = []
+    for e in entries:
+        list_url = yt_list_url(e.get("id") or e.get("url") or "")
+        if not list_url:
+            continue
+        count = e.get("playlist_count")
+        rows.append({
+            "kind": "ytplaylist",
+            "id": list_url,
+            "name": e.get("title") or str(e.get("id") or ""),
+            "artist": e.get("uploader") or e.get("channel") or "",
+            "songCount": int(count) if isinstance(count, (int, float)) else 0,
+        })
+    return rows
+
+
+def yt_track_rows(target, list_url, limit=YT_LIST_LIMIT):
+    entries, err = yt_dlp_lines(target, list_url, limit)
+    if err:
+        return info_row(err)
+    rows = []
+    for e in entries:
+        vid = str(e.get("id") or "")
+        url = str(e.get("url") or "")
+        if not url.startswith("https://") and YT_ID_RE.match(vid):
+            url = "https://www.youtube.com/watch?v=" + vid
+        if not url.startswith("https://"):
+            continue
+        duration = e.get("duration")
+        rows.append({
+            "kind": "yt",
+            "id": url,
+            "name": e.get("title") or vid,
+            "artist": e.get("uploader") or e.get("channel") or "",
+            "duration": int(duration) if isinstance(duration, (int, float)) else 0,
+        })
+    return rows
+
+
+def play_yt_list(target, cliamp, list_url, name):
+    rows = [r for r in yt_track_rows(target, list_url) if r["kind"] == "yt"]
+    if not rows:
+        return 1
+    lines = []
+    for r in rows:
+        lines += [
+            "[[track]]",
+            'path = "%s"' % toml_escape(r["id"]),
+            'title = "%s"' % toml_escape(r["name"]),
+            'artist = "%s"' % toml_escape(r["artist"]),
+            'album = "%s"' % toml_escape(name or ""),
+        ]
+        if r["duration"]:
+            lines.append("duration_secs = %d" % r["duration"])
+        lines.append("")
+    path = "~/.config/cliamp/playlists/" + SCRATCH_PLAYLIST + ".toml"
+    ssh(
+        target,
+        "mkdir -p ~/.config/cliamp/playlists && umask 077 && "
+        "cat > " + path + ".tmp && mv -f " + path + ".tmp " + path + " && "
+        + cliamp + " load " + sh_quote(SCRATCH_PLAYLIST) + " && sleep 0.3 && "
+        + cliamp + " play",
+        stdin_text="\n".join(lines),
+    )
+    print(name or list_url)
+    return 0
+
+
+def play_radio(target, cliamp, url, name, artist=""):
+    lines = [
         "[[track]]",
         'path = "%s"' % toml_escape(url),
         'title = "%s"' % toml_escape(name or "Radio"),
-        "",
-    ])
+    ]
+    if artist:
+        lines.append('artist = "%s"' % toml_escape(artist))
+    body = "\n".join(lines + [""])
     path = "~/.config/cliamp/playlists/" + SCRATCH_PLAYLIST + ".toml"
     ssh(
         target,
@@ -509,6 +677,40 @@ def main():
     if verb == "play-radio" and rest:
         return play_radio(target, cliamp, rest[0], " ".join(rest[1:]).strip())
 
+    # YouTube never touches the Subsonic server either; yt-dlp on the target does it all.
+    if verb == "yt":
+        query = " ".join(rest).strip()
+        print(json.dumps(yt_search(target, query) if query else []))
+        return 0
+
+    if verb == "play-yt" and rest:
+        if not rest[0].startswith("https://"):
+            return 2
+        title = rest[1] if len(rest) > 1 else ""
+        artist = rest[2] if len(rest) > 2 else ""
+        return play_radio(target, cliamp, rest[0], title or "YouTube", artist)
+
+    if verb == "yt-playlists":
+        query = " ".join(rest).strip()
+        print(json.dumps(yt_playlists(target, query) if query else []))
+        return 0
+
+    if verb in ("yt-tracks", "urls-yt") and rest:
+        list_url = yt_list_url(rest[0])
+        rows = yt_track_rows(target, list_url) if list_url else []
+        if verb == "urls-yt":
+            rows = [{"kind": "yt", "path": r["id"], "title": r["name"],
+                     "artist": r["artist"], "duration": r["duration"]}
+                    for r in rows if r["kind"] == "yt"]
+        print(json.dumps(rows))
+        return 0
+
+    if verb == "play-yt-list" and rest:
+        list_url = yt_list_url(rest[0])
+        if not list_url:
+            return 2
+        return play_yt_list(target, cliamp, list_url, " ".join(rest[1:]).strip())
+
     # Cheapest first: the URL the panel already holds, then a status probe over
     # the multiplexed connection, then the playlists on the remote disk.
     host, auth = server_from(panel_url)
@@ -578,7 +780,8 @@ if __name__ == "__main__":
     except Exception:
         if len(sys.argv) > 5 and sys.argv[5] in (
             "albums", "search", "artist-albums", "album-songs",
-            "urls", "url-song", "urls-artist", "radio", "radio-builtin"
+            "urls", "url-song", "urls-artist", "radio", "radio-builtin",
+            "yt", "yt-playlists", "yt-tracks", "urls-yt"
         ):
             print("[]")
         sys.exit(1)

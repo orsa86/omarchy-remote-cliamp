@@ -521,13 +521,13 @@ function parseResults(raw) {
     return out
   }
   if (!data || data.length === undefined) return out
-  var kinds = { song: true, album: true, artist: true, radio: true, albumsong: true }
+  var kinds = { song: true, album: true, artist: true, radio: true, albumsong: true, yt: true, ytplaylist: true, info: true }
   for (var i = 0; i < data.length && out.length < MAX_LIST_ITEMS; i++) {
     var a = data[i]
     if (!a || !a.id) continue
     out.push({
       kind: kinds[a.kind] ? String(a.kind) : "album",
-      // A radio row's id IS its stream URL, so ids get the path budget.
+      // A radio or YouTube row's id IS its URL, so ids get the path budget.
       id: clampText(a.id, MAX_PATH_CHARS),
       name: clampText(a.name, MAX_TEXT_CHARS),
       artist: clampText(a.artist, MAX_TEXT_CHARS),
@@ -557,6 +557,40 @@ function radioQuery(query) {
   if (lower.indexOf(":radio") === 0) return trim(text.slice(6))
   if (lower.indexOf("r:") === 0) return trim(text.slice(2))
   if (lower.indexOf(":r") === 0) return trim(text.slice(2))
+  return ""
+}
+
+// "yt:" sends the query to yt-dlp on the server — cliamp's own Ctrl+F fallback
+// when no provider search applies. Bare "yt:" is just an empty query.
+function isYtMode(query) {
+  var text = trim(query).toLowerCase()
+  return text.indexOf("yt:") === 0 || text.indexOf("youtube:") === 0
+    || text.indexOf(":yt") === 0 || text.indexOf(":youtube") === 0
+}
+
+// "ytp:" asks for playlists instead of videos — YouTube's own "Type: Playlist"
+// filter, which is where full-album uploads live. Checked before "yt:" since
+// the shorter prefix does not match it anyway.
+function isYtListMode(query) {
+  var text = trim(query).toLowerCase()
+  return text.indexOf("ytp:") === 0 || text.indexOf(":ytp") === 0
+}
+
+function ytListQuery(query) {
+  var text = trim(query)
+  var lower = text.toLowerCase()
+  if (lower.indexOf("ytp:") === 0) return trim(text.slice(4))
+  if (lower.indexOf(":ytp") === 0) return trim(text.slice(4))
+  return ""
+}
+
+function ytQuery(query) {
+  var text = trim(query)
+  var lower = text.toLowerCase()
+  if (lower.indexOf("youtube:") === 0) return trim(text.slice(8))
+  if (lower.indexOf(":youtube") === 0) return trim(text.slice(8))
+  if (lower.indexOf("yt:") === 0) return trim(text.slice(3))
+  if (lower.indexOf(":yt") === 0) return trim(text.slice(3))
   return ""
 }
 
