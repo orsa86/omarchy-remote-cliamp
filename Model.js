@@ -108,6 +108,9 @@ function defaultStatus() {
 //  "position":16.87,"duration":600,"volume":-6.04,"total":1,"shuffle":false,"repeat":"Off",...}
 // A radio entry adds "stream":true inside track. When no socket exists cliamp exits 1
 // and prints a plain sentence instead of JSON.
+// v2 snapshot responses (status/snapshot) carry the runtime state in a
+// snapshot field instead of flat fields. parseStatus handles both shapes so
+// the plugin works with cliamp v1 and v2.
 function parseStatus(raw) {
   var out = defaultStatus()
   if (frameTooLarge(raw)) {
@@ -134,7 +137,34 @@ function parseStatus(raw) {
 
   out.ok = data.ok === true
   if (!out.ok) {
-    out.lastError = elideError(String(data.error || text))
+    out.lastError = elideError(String((data.error && data.error.message) || data.error || text))
+    return out
+  }
+
+  // v2 protocol: state lives in a snapshot envelope.
+  if (data.snapshot && typeof data.snapshot === "object") {
+    var snap = data.snapshot
+    out.state = clampText(snap.state || "stopped", MAX_TEXT_CHARS)
+    out.volumeDb = numberOr(snap.volume, 0)
+    out.total = numberOr(snap.total, 0)
+    out.index = numberOr(snap.index, -1)
+    out.shuffle = snap.shuffle === true
+    out.repeat = clampText(snap.repeat || "Off", MAX_TEXT_CHARS)
+    out.visualizer = clampText(snap.visualizer, MAX_TEXT_CHARS)
+    out.eqFlat = bandsAreFlat(snap.eq_bands)
+
+    out.durationSec = numberOr(snap.duration, 0)
+    out.positionSec = numberOr(snap.position, 0)
+
+    var track = snap.track || snap.logical_track
+    if (track && typeof track === "object") {
+      out.title = clampText(track.title, MAX_TEXT_CHARS)
+      out.path = clampText(track.path, MAX_PATH_CHARS)
+      out.artist = clampText(track.artist, MAX_TEXT_CHARS)
+      out.album = clampText(track.album, MAX_TEXT_CHARS)
+      out.isStream = track.stream === true
+      if (out.durationSec <= 0) out.durationSec = numberOr(track.duration_secs, 0)
+    }
     return out
   }
 
@@ -314,6 +344,42 @@ function asBool(value, fallback) {
 // The exact answer cliamp gives for a track it found no lyrics for, measured on the box.
 var NO_LYRICS_ERROR = "no lyrics found"
 
+// v2 job acknowledgment: {"version":2,"ok":true,"job":{"id":"...","operation":"toggle","state":"queued"}}
+function parseJobAck(raw) {
+  if (frameTooLarge(raw)) return null
+  var data = null
+  try {
+    data = JSON.parse(String(raw || "").trim())
+  } catch (e) {
+    return null
+  }
+  if (!data || !data.job || !data.job.id) return null
+  return {
+    id: String(data.job.id || ""),
+    operation: String(data.job.operation || "")
+  }
+}
+
+// v2 job result: {"version":2,"ok":true,"job":{"id":"...","state":"succeeded","result":{...},"snapshot":{...}}}
+function parseJobResult(raw) {
+  if (frameTooLarge(raw)) return null
+  var data = null
+  try {
+    data = JSON.parse(String(raw || "").trim())
+  } catch (e) {
+    return null
+  }
+  if (!data || !data.job) return null
+  var job = data.job
+  return {
+    id: String(job.id || ""),
+    operation: String(job.operation || ""),
+    state: String(job.state || ""),
+    result: job.result,
+    snapshot: job.snapshot
+  }
+}
+
 // Sample input: {"ok":true,"state":"playing",..} {"ok":true,"lyrics":[..]} {"ok":true,"history":[..]} {"ok":true}
 // Only a status carries state; parsing an ack as one blanks the track.
 function messageKind(raw) {
@@ -327,9 +393,15 @@ function messageKind(raw) {
     return "ack"
   }
   if (!data || typeof data !== "object") return "ack"
+  // v2 job replies. The initial acknowledgement is state "queued"; a poll
+  // (job.get) replies "running" while the job is still going and only
+  // "succeeded"/"failed" once it settles and carries the result/snapshot.
+  if (data.job !== undefined && data.job.id !== undefined) {
+    if (data.job.state === "succeeded" || data.job.state === "failed") return "jobresult"
+    if (data.job.state === "running") return "jobpoll"
+    return "job"
+  }
   if (data.providers !== undefined) return "providers"
-  // provider.playlists is the only sender of a playlists field on this socket.
-  if (data.playlists !== undefined) return "stations"
   // queue.list and every queue mutation answer with the track list; checked
   // before status because these replies carry index/total too. provider.tracks
   // replies look the same — the Service tells them apart by what it asked for.
@@ -338,6 +410,8 @@ function messageKind(raw) {
   // Matched whole: a command error that merely names a file cannot be swallowed as this.
   if (data.ok === false && String(data.error || "") === NO_LYRICS_ERROR) return "lyrics"
   if (data.history !== undefined) return "history"
+  // v2 status replies wrap the state: {"version":2,"ok":true,"snapshot":{...state...}}
+  if (data.snapshot !== undefined) return "status"
   if (data.state !== undefined) return "status"
   return "ack"
 }
@@ -576,6 +650,7 @@ function providerQuery(query) {
 
 // Sample input, the reply to {"cmd":"provider.list"}:
 // {"ok":true,"providers":[{"id":"radio","name":"Radio"},{"id":"local","name":"Local"}]}
+// cliamp v2 names the key field "key" instead of "id", so both are read.
 function parseProviders(raw) {
   var out = []
   if (frameTooLarge(raw)) return out
@@ -589,11 +664,12 @@ function parseProviders(raw) {
   for (var i = 0; i < data.providers.length && out.length < MAX_LIST_ITEMS; i++) {
     var p = data.providers[i]
     if (!p) continue
-    var name = clampText(p.name || p.id, MAX_TEXT_CHARS)
+    var key = clampText(p.key || p.id, MAX_TEXT_CHARS)
+    var name = clampText(p.name || key, MAX_TEXT_CHARS)
     if (name.length === 0) continue
     out.push({
       kind: "provider",
-      id: clampText(p.id || name.toLowerCase(), MAX_TEXT_CHARS),
+      id: key.length > 0 ? key : name.toLowerCase(),
       name: name,
       artist: "", album: "", albumId: "", songCount: 0, duration: 0
     })
