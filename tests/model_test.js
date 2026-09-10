@@ -77,6 +77,49 @@ function assert(cond, label) {
   assert(clampText(null, 3) === "", "clampText null")
 })()
 
+// ---- v2 protocol classification ----
+
+;(function () {
+  // A synced status snapshot at top level, as replied by runtime.status.
+  var frame = '{"version":2,"ok":true,"snapshot":{"state":"playing","track":{"title":"T","artist":"A","path":"p","stream":true},"position":1.5,"total":12}}'
+  assert(messageKind(frame) === "status", "messageKind snapshot envelope -> status")
+  var s = parseStatus(frame)
+  assert(s.ok === true && s.title === "T" && s.artist === "A" && s.state === "playing", "parseStatus v2 snapshot fields")
+  assert(s.positionSec === 1.5 && s.total === 12, "parseStatus v2 position/total")
+  assert(s.isStream === true, "parseStatus v2 track stream flag")
+})()
+
+;(function () {
+  var ack = '{"version":2,"ok":true,"job":{"id":"j1","operation":"toggle","state":"queued"}}'
+  assert(messageKind(ack) === "job", "messageKind queued -> job")
+  var pa = parseJobAck(ack)
+  assert(pa && pa.id === "j1" && pa.operation === "toggle", "parseJobAck fields")
+  var running = '{"version":2,"ok":true,"job":{"id":"j1","operation":"lyrics","state":"running"}}'
+  assert(messageKind(running) === "jobpoll", "messageKind running -> jobpoll")
+  var done = '{"version":2,"ok":true,"job":{"id":"j1","operation":"queue.list","state":"succeeded","result":{"ok":true,"total":1,"tracks":[]},"snapshot":{"state":"paused"}}}'
+  assert(messageKind(done) === "jobresult", "messageKind succeeded -> jobresult")
+  var pr = parseJobResult(done)
+  assert(pr && pr.state === "succeeded" && pr.result && pr.result.total === 1, "parseJobResult result")
+  assert(pr.snapshot && pr.snapshot.state === "paused", "parseJobResult snapshot")
+})()
+
+;(function () {
+  // v2 names the provider key field "key" instead of "id".
+  var p1 = parseProviders('{"ok":true,"providers":[{"key":"yt","name":"YouTube (All)"},{"id":"radio","name":"Radio"}]}')
+  assert(p1.length === 2, "parseProviders v2 row count")
+  assert(p1[0].id === "yt", "parseProviders v2 reads key")
+  assert(p1[1].id === "radio", "parseProviders v1 id still read")
+})()
+
+// A v2 queue row carries no index field; the Service derives it from the
+// snapshot path. parseQueue must still hold the tracks in order.
+;(function () {
+  var q = parseQueue('{"ok":true,"total":2,"tracks":[{"title":"a","path":"/1"},{"title":"b","path":"/2"}]}')
+  assert(q.ok && q.index === 0 && q.tracks.length === 2, "parseQueue v2 shape")
+  assert(q.tracks[1].title === "b", "parseQueue v2 keeps order")
+  assert(q.tracks[0].isStream === false, "parseQueue v2 default flags")
+})()
+
 console.log(checks + " checks, " + failures + " failures")
 if (failures > 0) throw new Error(failures + " test failures")
 console.log("OK")
