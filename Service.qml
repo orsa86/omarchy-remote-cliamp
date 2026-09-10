@@ -672,7 +672,7 @@ Item {
             if (ack && ack.id.length > 0) {
               root.pendingJobs.push(ack.id)
               root.jobPollAttempts = 0
-              root.jobPollTimer.restart()
+              if (root.jobPollTimer) root.jobPollTimer.restart()
             }
             return
           }
