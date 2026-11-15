@@ -76,7 +76,7 @@ The full reference lives in [Configuration](#configuration).
 ### Setting up a remote server
 
 The server needs exactly two things: passwordless ssh in, and a cliamp
-(**>= 1.63**) owning its socket.
+(**>= 1.63**, 1.x or 2.x) owning its socket.
 
 **1. ssh.** The plugin runs ssh non-interactively (`BatchMode=yes`), so key
 auth has to work without any prompt. One-time setup from your desktop:
@@ -99,7 +99,7 @@ Host livingroom.lan
 **2. cliamp.** On the server:
 
 ```bash
-cliamp --version               # >= 1.63 (older ones have no IPC socket)
+cliamp --version               # >= 1.63, 1.x or 2.x (older ones have no IPC socket)
 cliamp --daemon                # or run the TUI in a tmux — either owns the socket
 ```
 
@@ -214,6 +214,13 @@ cliamp speaks newline-delimited JSON on a unix socket. The plugin holds one
 the local plugin talks to a local cliamp. Status, transport, seek, lyrics and
 playlist loads all ride that one tunnel; the spectrum analyzer is
 `cliamp visstream` run over ssh while the panel is open.
+
+cliamp 2.0 replaced the 1.x socket protocol outright — bare `{"cmd":…}` lines
+became versioned envelopes, jobs and an event stream — so the plugin finds out
+which one a server speaks each time it connects. A 1.63 server and a 2.x server
+sit side by side in one picker. Against 2.x a second connection on the same
+tunnel carries the event stream, so a change made elsewhere — the TUI on the
+server, another panel — shows up here without waiting for a poll.
 
 The tunnel doubles as an ssh ControlMaster (`remote-cliamp.<label>.ctl`), so
 every other ssh the plugin makes is a channel on the already-open connection:

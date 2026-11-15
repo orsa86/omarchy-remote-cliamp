@@ -250,15 +250,7 @@ Item {
     if (!hasStreamVolume) return
     _pwStreamNode.audio.volume = Math.max(0, Math.min(1, Number(v) || 0))
   }
-  readonly property real volumeDb: {
-    // cliamp v2 dropped the volume field from its status snapshot (it was there
-    // in v1). Remote, the only observable truth is what we last told it, so the
-    // slider falls back to the last set value instead of snapping to 0db.
-    var v = Number(status.volumeDb || 0)
-    if (v !== 0) return v
-    return _sentVolumeDb > -900 ? _sentVolumeDb : v
-  }
-  property real _sentVolumeDb: -999
+  readonly property real volumeDb: Number(status.volumeDb || 0)
   property real pendingVolumeDb: -999
   readonly property real shownVolumeDb: pendingVolumeDb > -900 ? pendingVolumeDb : volumeDb
 
@@ -284,8 +276,7 @@ Item {
     if (_volumeTargetDb < -900) return
     var db = _volumeTargetDb
     _volumeTargetDb = -999
-    _sentVolumeDb = db
-    if (send(v2Request("volume", { "value": db }))) settleTimer.restart()
+    if (request("volume", { "value": db })) settleTimer.restart()
   }
 
   Timer {
@@ -328,7 +319,7 @@ Item {
   function playPause() {
     pendingPlaying = isPlaying ? 0 : 1
     playHold.restart()
-    if (send(v2Request("toggle"))) settleTimer.restart()
+    if (request("toggle")) settleTimer.restart()
   }
 
   Timer {
@@ -338,8 +329,8 @@ Item {
     onTriggered: root.pendingPlaying = -1
   }
 
-  function next() { if (send(v2Request("next"))) settleTimer.restart() }
-  function previous() { if (send(v2Request("prev"))) settleTimer.restart() }
+  function next() { if (request("next")) settleTimer.restart() }
+  function previous() { if (request("prev")) settleTimer.restart() }
 
   // The socket seek takes a delta, not a position, measured on 1.63.2.
   function seekTo(targetSec) {
@@ -350,27 +341,39 @@ Item {
     var target = Math.max(0, Math.min(lengthSec, Number(targetSec) || 0))
     var delta = Math.round(target - positionSec)
     positionSec = target
-    if (send(v2Request("seek", { "value": delta }))) settleTimer.restart()
+    if (request("seek", { "value": delta })) settleTimer.restart()
   }
 
   function seekBy(deltaSec) { seekTo(positionSec + Number(deltaSec || 0)) }
 
+  // ---- the wire ----
+
+  // cliamp 2.0 replaced the socket protocol outright: 1.x takes bare
+  // {"cmd":...} lines and answers each in place, 2.x takes only versioned
+  // envelopes, runs every operation as a job and reports the outcome on an
+  // event stream. One server picker can hold both generations, so the dialect
+  // is found per connection: the first status goes out as 2.x, and a 1.x
+  // daemon gives itself away by answering without a version. 0 = not known yet.
+  property int protocol: 0
+  // 2.x results arrive on the event stream, so nothing that expects one may
+  // go out before the subscription stands.
+  property bool eventsReady: false
+  readonly property bool ipcReady: ipcConnected && (protocol === 1 || (protocol === 2 && eventsReady))
+
+  // Doubles as the dialect probe while the protocol is still unknown.
   function refreshStatus() {
     if (!ipcConnected) return
-    ipcLoader.item.write(v2Request("runtime.status") + "\n")
+    ipcLoader.item.write((protocol === 1 ? Model.v1Request("status") : Model.V2_STATE_REQUEST) + "\n")
     ipcLoader.item.flush()
   }
 
-  // v2 IPC protocol helpers
-  function v2Request(operation, params) {
-    var req = { "version": 2, "operation": operation }
-    if (params) req.params = params
-    return JSON.stringify(req)
-  }
-
-  function send(payload) {
-    if (!ipcConnected) return false
-    ipcLoader.item.write(payload + "\n")
+  // One verb, either dialect. Operation names and their arguments are the same
+  // in both; only the envelope differs.
+  function request(operation, params) {
+    if (!ipcReady) return false
+    ipcLoader.item.write((protocol === 2
+      ? Model.v2Submit(operation, params)
+      : Model.v1Request(operation, params)) + "\n")
     ipcLoader.item.flush()
     return true
   }
@@ -402,7 +405,7 @@ Item {
     if (path === lyricsTrackPath) return
     lyrics = []
     if (lyricsPendingPath.length > 0) return
-    if (send(v2Request("lyrics"))) {
+    if (request("lyrics")) {
       lyricsPendingPath = path
       lyricsTrackPath = path
       lyricsStatus = "loading"
@@ -431,12 +434,12 @@ Item {
     lyricsTrackPath = ""
   }
 
-  function acceptLyrics(raw) {
+  function acceptLyrics(rows) {
     var wanted = lyricsPendingPath
     lyricsPendingPath = ""
     lyricsTimeout.stop()
     if (wanted === String(status.path || "")) {
-      lyrics = Model.parseLyrics(raw)
+      lyrics = rows
       lyricsStatus = lyrics.length > 0 ? "ok" : "notfound"
       return
     }
@@ -457,22 +460,75 @@ Item {
   property var queue: []
   property int queueIndex: 0
 
-  function refreshQueue() { send(v2Request("queue.list")) }
+  function refreshQueue() {
+    if (protocol !== 2) { request("queue.list"); return }
+    _queueAcc = null
+    _askQueuePage(0)
+  }
+
+  // 2.x pages the queue, V2_PAGE_SIZE rows at a time. Rows gather here and
+  // reach the screen as one list, so a long queue never shows up cut short.
+  property var _queueAcc: null
+  property real _queueAccRevision: -1
+  // The playlist revision the list on screen reflects; -1 while it may be stale.
+  property real _queueRevision: -1
+
+  function _askQueuePage(offset) {
+    return request("queue.list", { "offset": offset, "limit": Model.V2_PAGE_SIZE })
+  }
+
+  // snapshot is the job's own: it says which revision of the list the page is.
+  function _acceptQueuePage(page, snapshot) {
+    var rev = snapshot ? snapshot.playlistRevision : -1
+    if (page.offset > 0) {
+      // A continuation counts only as the next page of the list being gathered.
+      if (_queueAcc === null || page.offset !== _queueAcc.length || rev < _queueAccRevision) return
+      // The list moved on under the read: start over.
+      if (rev > _queueAccRevision) { _queueAcc = null; _queueRevision = -1; return }
+      _queueAcc = _queueAcc.concat(page.tracks)
+    } else {
+      // Rows promised and none delivered is a page past the end of a list
+      // that shrank, not a first page.
+      if (page.tracks.length === 0 && page.total > 0) { _queueAcc = null; _queueRevision = -1; return }
+      _queueAcc = page.tracks
+      _queueAccRevision = rev
+    }
+    queueIndex = page.index
+    var want = Math.min(page.total, Model.MAX_LIST_ITEMS)
+    if (_queueAcc.length < want && page.tracks.length > 0 && panelOpen) { queueSync.restart(); return }
+    queue = _queueAcc.slice(0, Model.MAX_LIST_ITEMS)
+    _queueRevision = _queueAcc.length >= want ? _queueAccRevision : -1
+    _queueAcc = null
+  }
+
+  Timer {
+    id: queueSync
+    // A mutation's own job record carries the fresh list and lands right
+    // behind the state event that announces it; this is long enough for it to
+    // win, so a change costs no extra read and a burst of them at most a few.
+    interval: 120
+    repeat: false
+    onTriggered: {
+      if (root.protocol !== 2 || !root.panelOpen) return
+      if (root._queueAcc !== null) root._askQueuePage(root._queueAcc.length)
+      else if (root.status.ok === true && root.status.playlistRevision !== root._queueRevision) root._askQueuePage(0)
+    }
+  }
 
   // Every mutation answers with the fresh track list, so the panel updates from
   // the reply itself — no follow-up read. Indices are 0-based, verified in
   // ipc_extended.go and live against 1.63.2.
   function queueJump(i) {
-    if (send(v2Request("queue.play", { "index": Number(i) }))) settleTimer.restart()
+    if (request("queue.play", { "index": Number(i) })) settleTimer.restart()
   }
 
   function queueRemove(i) {
-    if (send(v2Request("queue.remove", { "index": Number(i) }))) settleTimer.restart()
+    if (request("queue.remove", { "index": Number(i) })) settleTimer.restart()
   }
 
   function queueMove(i, to) {
     if (to < 0 || to >= queue.length) return
-    if (send(v2Request("queue.move", { "index": Number(i), "to": Number(to) }))) settleTimer.restart()
+    if (request("queue.move", { "index": Number(i), "to": Number(to) })) settleTimer.restart()
   }
 
   onQueueOpenChanged: if (queueOpen) refreshQueue()
@@ -489,7 +545,7 @@ Item {
   property string _stationQueuePending: ""
 
   function refreshStations() {
-    if (send(v2Request("provider.playlists", { "provider": "radio" }))) {
+    if (request("provider.playlists", { "provider": "radio" })) {
       _stationsPending = true
       stationsTimeout.restart()
     }
@@ -506,7 +562,7 @@ Item {
   property bool _provListsPending: false
 
   function refreshProviders() {
-    if (send(v2Request("provider.list"))) {
+    if (request("provider.list")) {
       _providersPending = true
       stationsTimeout.restart()
     }
@@ -515,7 +571,7 @@ Item {
   function enterProvider(item) {
     browseProvider = { id: String(item.id), name: String(item.name || "") }
     providerPlaylists = []
-    if (send(v2Request("provider.playlists", { "provider": String(item.id) }))) {
+    if (request("provider.playlists", { "provider": String(item.id) })) {
       _provListsPending = true
       stationsTimeout.restart()
     }
@@ -525,35 +581,49 @@ Item {
   function playProviderPlaylist(item) {
     if (!browseProvider) return
     // Same shape as a station: provider.load replaces the queue, then play.
-    if (send(v2Request("provider.load", { "provider": String(browseProvider.id), "playlist": String(item.id) }))) {
-      send(v2Request("play"))
+    if (request("provider.load", { "provider": String(browseProvider.id), "playlist": String(item.id) })) {
+      request("play")
       settleTimer.restart()
     }
   }
 
   function queueProviderPlaylist(item) {
     if (!browseProvider || _stationQueuePending.length > 0) return
-    if (send(v2Request("provider.tracks", { "provider": String(browseProvider.id), "playlist": String(item.id) }))) {
-      _stationQueuePending = String(item.id)
-      stationsTimeout.restart()
-    }
+    _askTracks(String(browseProvider.id), String(item.id), 0)
+  }
+
+  // The provider.tracks question that is out, so a paged answer can be
+  // continued: { provider, playlist, offset }.
+  property var _tracksAsk: null
+
+  function _askTracks(provider, playlist, offset) {
+    var params = { "provider": provider, "playlist": playlist }
+    // 2.x pages this list too; 1.x answers with all of it.
+    if (protocol === 2) { params.offset = offset; params.limit = Model.V2_PAGE_SIZE }
+    if (!request("provider.tracks", params)) return false
+    _stationQueuePending = playlist
+    _tracksAsk = { provider: provider, playlist: playlist, offset: offset }
+    stationsTimeout.restart()
+    return true
+  }
+
+  function _queuePaths(paths) {
+    for (var i = 0; i < paths.length; i++) request("queue", { "path": paths[i] })
+    if (paths.length > 0) settleTimer.restart()
   }
 
   function playStation(item) {
     // provider.load replaces the queue with the station but lands paused,
     // measured on 1.63.2; requests are served in order, so play follows it.
-    if (send(v2Request("provider.load", { "provider": "radio", "playlist": String(item.id) }))) {
-      send(v2Request("play"))
+    if (request("provider.load", { "provider": "radio", "playlist": String(item.id) })) {
+      request("play")
       settleTimer.restart()
     }
   }
 
   function queueStation(item) {
     if (_stationQueuePending.length > 0) return
-    if (send(v2Request("provider.tracks", { "provider": "radio", "playlist": String(item.id) }))) {
-      _stationQueuePending = String(item.id)
-      stationsTimeout.restart()
-    }
+    _askTracks("radio", String(item.id), 0)
   }
 
   Timer {
@@ -563,6 +633,7 @@ Item {
     onTriggered: {
       root._stationsPending = false
       root._stationQueuePending = ""
+      root._tracksAsk = null
       root._providersPending = false
       root._provListsPending = false
     }
@@ -573,6 +644,15 @@ Item {
   property string _queueSeen: ""
 
   function _maybeRefreshQueue() {
+    if (protocol === 2) {
+      // The snapshot names the playing row itself, and its playlist revision
+      // says exactly when the list on screen went stale.
+      if (status.ok !== true) return
+      if (status.index >= 0) queueIndex = status.index
+      if (!panelOpen) return
+      if ((_queueAcc !== null || status.playlistRevision !== _queueRevision) && !queueSync.running) queueSync.start()
+      return
+    }
     // The collapsed summary line shows the playing row, so the list stays fresh
     // whenever the panel is open, not only while the queue section is.
     if (!panelOpen) return
@@ -585,42 +665,161 @@ Item {
     refreshQueue()
   }
 
-  // ---- v2 async job polling ----
+  // ---- what comes back ----
 
-  // A short FIFO of job ids awaiting completion. v2 serves nearly every
-  // operation as a job, and the panel sends a few back-to-back (provider.load
-  // + play, provider.tracks xx several times), so one slot is not enough.
-  property var pendingJobs: []
-
-  function pollJob() {
-    if (pendingJobs.length === 0 || !ipcConnected) return
-    // Job.get escapes the `operation` namespace (it is not in the capabilities
-    // list) and is instead dispatched by `method`, reading job_id at the top
-    // level — measured against cliamp 2.0.1 with both shapes.
-    var frame = JSON.stringify({ "version": 2, "method": "job.get", "job_id": String(pendingJobs[0]) })
-    if (send(frame)) {
-      jobPollAttempts++
-      jobPollTimer.restart()
+  function _handleLine(raw) {
+    // The assembler already dropped anything this big, but keep the guard in
+    // front of JSON.parse anyway.
+    if (raw.length > Model.MAX_FRAME_BYTES) return
+    if (protocol === 1 && !Model.looksLikeV2(raw)) { _handleV1Line(raw); return }
+    var frame = Model.parseV2Frame(raw)
+    if (frame.kind === "none") return
+    var spoke = frame.kind === "legacy" ? 1 : 2
+    if (spoke !== protocol) {
+      // The first answer on a connection names the dialect. Unless it is a
+      // 2.x daemon answering the 2.x probe, it answered a question asked in
+      // the wrong dialect: drop it and ask for the status again in the right one.
+      var probed = protocol === 0 && spoke === 2
+      protocol = spoke
+      if (!probed) { refreshStatus(); return }
     }
+    if (spoke === 2) _handleV2Frame(frame)
   }
 
-  Timer {
-    id: jobPollTimer
-    interval: 150
-    repeat: false
-    onTriggered: {
-      if (root.pendingJobs.length === 0) return
-      root.pollJob()
-      // A stuck job would otherwise be polled forever, so drop it after ~4.5s.
-      // Its result is still processed if it later lands (the handler does not
-      // require the id to be queued).
-      if (root.jobPollAttempts >= 30) {
-        root.pendingJobs.shift()
-        root.jobPollAttempts = 0
+  // 2.x numbers its snapshots, and they arrive on two connections — the
+  // poll's and the event stream's — so an older one can land after a newer.
+  property real _stateRevision: -1
+
+  function _applyStatus(parsed) {
+    if (parsed.ok && protocol === 2) {
+      // Stale, but still proof the daemon is alive.
+      if (parsed.revision < _stateRevision) { freshTimer.restart(); return }
+      _stateRevision = parsed.revision
+    }
+    status = parsed
+    lastError = parsed.ok ? "" : parsed.lastError
+    if (parsed.ok) { positionSec = Number(parsed.positionSec || 0); freshTimer.restart() }
+  }
+
+  // cliamp 1.x: one reply per request, in order, told apart by shape.
+  function _handleV1Line(raw) {
+    var kind = Model.messageKind(raw)
+    if (kind === "providers") {
+      _providersPending = false
+      providers = Model.parseProviders(raw)
+      _recomputeResults()
+      return
+    }
+    if (kind === "stations") {
+      // Same reply shape serves two askers: the radio view and a
+      // provider drill-down. Whoever asked last owns it.
+      if (_provListsPending) {
+        _provListsPending = false
+        var rows = Model.parseStations(raw)
+        for (var pi = 0; pi < rows.length; pi++) rows[pi].kind = "provplaylist"
+        providerPlaylists = rows
+      } else {
+        _stationsPending = false
+        stations = Model.parseStations(raw)
       }
+      _recomputeResults()
+      return
     }
+    if (kind === "queue") {
+      // Same shape as a queue reply; ownership decides the meaning.
+      if (_stationQueuePending.length > 0) {
+        _stationQueuePending = ""
+        _tracksAsk = null
+        // parseQueue drops the path field, so the raw reply is what queues.
+        _queuePaths(Model.trackPaths(Model.parseObject(raw)).paths)
+        return
+      }
+      var q = Model.parseQueue(raw)
+      if (q.ok) { queue = q.tracks; queueIndex = q.index }
+      return
+    }
+    if (kind === "lyrics") { acceptLyrics(Model.parseLyrics(raw)); return }
+    if (kind === "ack") { lastError = Model.ackError(raw); return }
+    if (kind !== "status") return
+    _applyStatus(Model.parseStatus(raw))
   }
-  property int jobPollAttempts: 0
+
+  // cliamp 2.x: a state read answers in place; everything else answers with a
+  // job whose final record — result and fresh snapshot — arrives as an event.
+  // That stream reports every client's jobs, which is welcome for the queue
+  // (the list follows changes made elsewhere) and filtered for the rest by
+  // what this panel is actually waiting on.
+  function _handleV2Frame(frame) {
+    if (frame.kind === "state") { _applyStatus(frame.status); return }
+    if (frame.kind === "job") { _handleJob(frame); return }
+    if (frame.kind === "error") lastError = frame.message
+    // "ack": accepted; the outcome follows on the event stream.
+  }
+
+  function _handleJob(job) {
+    var op = job.operation
+    if (!job.ok) {
+      // A track without lyrics fails its job; that is an answer, not a fault.
+      if (op !== "lyrics") lastError = job.error
+      else if (lyricsPendingPath.length > 0) acceptLyrics([])
+      return
+    }
+    // The queue page goes first: it settles which playlist revision the list
+    // on screen reflects, so the snapshot behind it does not ask for it again.
+    if (Model.isQueueOperation(op)) {
+      _acceptQueuePage(Model.queuePageFromResult(job.result), job.status)
+    } else if (op === "lyrics") {
+      if (lyricsPendingPath.length > 0) acceptLyrics(Model.lyricsFromData(job.result))
+    } else if (op === "provider.list") {
+      _providersPending = false
+      providers = Model.providersFromData(job.result)
+      _recomputeResults()
+    } else if (op === "provider.playlists") {
+      _acceptPlaylists(job.result)
+    } else if (op === "provider.tracks") {
+      _acceptTracks(job.result)
+    }
+    if (job.status) _applyStatus(job.status)
+  }
+
+  // 2.x rows name their provider, which settles whose list this is: the radio
+  // view's, the drill-down's, or — browsing the radio provider — both. An
+  // empty list names nobody and goes to whoever asked last, as on 1.x.
+  function _acceptPlaylists(result) {
+    var key = Model.playlistsProvider(result)
+    var toBrowse = key.length > 0
+      ? browseProvider !== null && key === String(browseProvider.id)
+      : _provListsPending
+    var toStations = key.length > 0 ? key === "radio" : (!_provListsPending && _stationsPending)
+    if (toBrowse) {
+      _provListsPending = false
+      var rows = Model.stationsFromData(result)
+      for (var i = 0; i < rows.length; i++) rows[i].kind = "provplaylist"
+      providerPlaylists = rows
+    }
+    if (toStations) {
+      _stationsPending = false
+      stations = Model.stationsFromData(result)
+    }
+    if (toBrowse || toStations) _recomputeResults()
+  }
+
+  // Only ever this panel's own question: these rows get queued, so somebody
+  // else's provider.tracks must not land here.
+  function _acceptTracks(result) {
+    var ask = _tracksAsk
+    if (_stationQueuePending.length === 0 || !ask) return
+    var named = result ? String(result.playlist || "") : ""
+    if (named.length > 0 && named !== ask.playlist) return
+    var got = Model.trackPaths(result)
+    _queuePaths(got.paths)
+    var next = ask.offset + got.count
+    var total = result ? Number(result.total) || 0 : 0
+    if (got.count > 0 && next < total && next < Model.MAX_LIST_ITEMS
+        && _askTracks(ask.provider, ask.playlist, next)) return
+    _stationQueuePending = ""
+    _tracksAsk = null
+  }
 
   // ---- the socket itself ----
 
@@ -630,6 +829,17 @@ Item {
   // status would otherwise survive that flapping forever. freshTimer is the answer:
   // only an actual status reply keeps the panel claiming the server is up.
   readonly property bool ipcConnected: !!(ipcLoader.item && ipcLoader.item.connected)
+
+  // A new connection may reach a different daemon — restarted, or upgraded
+  // across the protocol break — so nothing learned from the old one survives.
+  onIpcConnectedChanged: if (!ipcConnected) protocol = 0
+
+  onProtocolChanged: {
+    _stateRevision = -1
+    _queueAcc = null
+    _queueRevision = -1
+    _openEvents()
+  }
 
   Loader {
     id: ipcLoader
@@ -656,160 +866,77 @@ Item {
         splitMarker: ""
         onRead: function (chunk) {
           var lines = ipcSocket.lineAssembler.feed(chunk)
-          for (var li = 0; li < lines.length; li++) ipcSocket.handleLine(lines[li])
+          for (var li = 0; li < lines.length; li++) root._handleLine(String(lines[li] || ""))
         }
       }
+    }
+  }
 
-      function handleLine(line) {
-          var raw = String(line || "")
-          // The assembler already dropped anything this big, but keep the guard
-          // in front of JSON.parse anyway.
-          if (raw.length > Model.MAX_FRAME_BYTES) return
-          var kind = Model.messageKind(raw)
-          if (kind === "job") {
-            // v2 async operation ack: queue the job id for result polling.
-            var ack = Model.parseJobAck(raw)
-            if (ack && ack.id.length > 0) {
-              root.pendingJobs.push(ack.id)
-              root.jobPollAttempts = 0
-              if (root.jobPollTimer) root.jobPollTimer.restart()
-            }
-            return
-          }
-          if (kind === "jobpoll") {
-            // Still working; jobPollTimer fires again on its own after the send.
-            return
-          }
-          if (kind === "jobresult") {
-            var done = Model.parseJobResult(raw)
-            // Stop polling once the job at the head completes.
-            if (done && root.pendingJobs.length > 0 && done.id === root.pendingJobs[0]) {
-              root.pendingJobs.shift()
-              root.jobPollAttempts = 0
-            }
-            if (done && done.snapshot) {
-              // The job's snapshot is the fresh state: consume it like a status.
-              var snapRaw = JSON.stringify({ "ok": true, "snapshot": done.snapshot })
-              var snapParsed = Model.parseStatus(snapRaw)
-              if (snapParsed.ok) root.status = snapParsed
-              if (snapParsed.ok) { root.positionSec = snapParsed.positionSec; freshTimer.restart() }
-            }
-            if (done) {
-              var op = done.operation || ""
-              var res = done.result || {}
-              if (op === "queue.list") {
-                var qResult = res && res.tracks !== undefined
-                  ? Model.parseQueue(JSON.stringify({ "ok": true, "index": res.index, "tracks": res.tracks }))
-                  : { ok: false, index: 0, tracks: [] }
-                if (qResult.ok) {
-                  root.queue = qResult.tracks
-                  // v2 drops the "index" field from the queue reply, so find the
-                  // playing row by matching the snapshot's current path instead.
-                  root.queueIndex = qResult.index
-                  if (root.queueIndex === 0) {
-                    var want = String(root.status.path || "")
-                    for (var qi = 0; qi < res.tracks.length && root.queueIndex === 0; qi++) {
-                      if (String(res.tracks[qi].path || "") === want) root.queueIndex = qi
-                    }
-                  }
-                }
-              } else if (op === "provider.playlists") {
-                if (root._provListsPending) {
-                  root._provListsPending = false
-                  var plrows = res && res.playlists !== undefined
-                    ? Model.parseStations(JSON.stringify({ "ok": true, "playlists": res.playlists }))
-                    : []
-                  for (var pi = 0; pi < plrows.length; pi++) plrows[pi].kind = "provplaylist"
-                  root.providerPlaylists = plrows
-                } else {
-                  root._stationsPending = false
-                  root.stations = res && res.playlists !== undefined
-                    ? Model.parseStations(JSON.stringify({ "ok": true, "playlists": res.playlists }))
-                    : []
-                }
-                root._recomputeResults()
-              } else if (op === "provider.tracks") {
-                root._stationQueuePending = ""
-                var pdata = res || {}
-                var plist = pdata.tracks && pdata.tracks.length !== undefined ? pdata.tracks : []
-                for (var ti = 0; ti < plist.length; ti++) {
-                  var p = plist[ti] ? String(plist[ti].path || "") : ""
-                  if (p.length > 0) root.send(v2Request("queue", { "path": p }))
-                }
-                if (plist.length > 0) settleTimer.restart()
-              } else if (op === "provider.list") {
-                root._providersPending = false
-                root.providers = res && res.providers !== undefined
-                  ? Model.parseProviders(JSON.stringify({ "ok": true, "providers": res.providers }))
-                  : []
-                root._recomputeResults()
-              } else if (op === "lyrics") {
-                root.acceptLyrics(JSON.stringify(res))
-              } else if (op === "load" || op === "provider.load" || op === "queue"
-                  || op === "queue.play" || op === "queue.move" || op === "queue.remove"
-                  || op === "volume" || op === "seek"
-                  || op === "toggle" || op === "play" || op === "next" || op === "prev") {
-                // Every queue mutation answers with the fresh track list (v1
-                // sent this on each reply; v2 wraps the same list in the job
-                // result), so the on-screen queue stays current with no re-read.
-                if (res && res.tracks !== undefined) {
-                  var mq = Model.parseQueue(JSON.stringify({ "ok": true, "index": res.index, "tracks": res.tracks }))
-                  if (mq.ok) root.queue = mq.tracks
-                }
-                settleTimer.restart()
-              }
-            }
-            return
-          }
-          if (kind === "providers") {
-            root._providersPending = false
-            root.providers = Model.parseProviders(raw)
-            root._recomputeResults()
-            return
-          }
-          if (kind === "stations") {
-            // Same reply shape serves two askers: the radio view and a
-            // provider drill-down. Whoever asked last owns it.
-            if (root._provListsPending) {
-              root._provListsPending = false
-              var rows = Model.parseStations(raw)
-              for (var pi = 0; pi < rows.length; pi++) rows[pi].kind = "provplaylist"
-              root.providerPlaylists = rows
-            } else {
-              root._stationsPending = false
-              root.stations = Model.parseStations(raw)
-            }
-            root._recomputeResults()
-            return
-          }
-          if (kind === "queue") {
-            // Same shape as a queue reply; ownership decides the meaning.
-            if (root._stationQueuePending.length > 0) {
-              root._stationQueuePending = ""
-              // parseQueue drops the path field, so the raw reply is what queues.
-              var data = null
-              try { data = JSON.parse(raw) } catch (e) { data = null }
-              var list = data && data.tracks && data.tracks.length !== undefined ? data.tracks : []
-              for (var ti = 0; ti < list.length; ti++) {
-                var p = list[ti] ? String(list[ti].path || "") : ""
-                if (p.length > 0) root.send(v2Request("queue", { "path": p }))
-              }
-              if (list.length > 0) settleTimer.restart()
-              return
-            }
-            var q = Model.parseQueue(raw)
-            if (q.ok) { root.queue = q.tracks; root.queueIndex = q.index }
-            return
-          }
-          if (kind === "lyrics") { root.acceptLyrics(raw); return }
-          if (kind === "ack") { root.lastError = Model.ackError(raw); return }
-          if (kind !== "status") return
-          var parsed = Model.parseStatus(raw)
-          root.status = parsed
-          root.lastError = parsed.ok ? "" : parsed.lastError
-          if (parsed.ok) { root.positionSec = Number(parsed.positionSec || 0); freshTimer.restart() }
+  // ---- the 2.x event stream ----
+
+  // A second connection to the same socket, because a subscribed connection
+  // is the server's to write on: it closes the moment anything else is sent.
+  function _openEvents() {
+    eventsReady = false
+    eventLoader.active = false
+    eventLoader.active = ipcConnected && protocol === 2
+  }
+
+  function _handleEventLine(raw) {
+    if (raw.length > Model.MAX_FRAME_BYTES) return
+    var frame = Model.parseV2Frame(raw)
+    if (frame.kind === "ok" && frame.id === "events") {
+      // Subscribed. Whatever happened before this moment was not reported
+      // here, so read the state once and let it pull the rest along.
+      eventsReady = true
+      _queueRevision = -1
+      refreshStatus()
+      if (panelOpen) refreshQueue()
+      return
+    }
+    // The stream fell behind and the server is about to close it: open a
+    // fresh one, which re-reads the state as above.
+    if (frame.kind === "overflow") { _openEvents(); return }
+    // A refused subscription; eventRetry tries again at its own pace.
+    if (frame.kind === "error" || frame.kind === "legacy") { eventsReady = false; eventLoader.active = false; return }
+    if (eventsReady) _handleV2Frame(frame)
+  }
+
+  Loader {
+    id: eventLoader
+    active: false
+    sourceComponent: Socket {
+      id: eventSocket
+      path: root.socketPath
+      connected: true
+
+      // Same capped assembler as the request socket, for the same reason.
+      property var lineAssembler: Model.createLineAssembler(Model.MAX_FRAME_BYTES)
+
+      onConnectionStateChanged: {
+        if (!connected) { root.eventsReady = false; return }
+        write(Model.V2_SUBSCRIBE_REQUEST + "\n")
+        flush()
+      }
+
+      parser: SplitParser {
+        splitMarker: ""
+        onRead: function (chunk) {
+          var lines = eventSocket.lineAssembler.feed(chunk)
+          for (var li = 0; li < lines.length; li++) root._handleEventLine(String(lines[li] || ""))
+        }
       }
     }
+  }
+
+  // Without the stream a 2.x daemon still answers status, but no job would
+  // ever report back, so the stream is chased for as long as it is missing.
+  Timer {
+    id: eventRetry
+    interval: 1500
+    repeat: true
+    running: root.ipcConnected && root.protocol === 2 && !root.eventsReady
+    onTriggered: root._openEvents()
   }
 
   Timer {
@@ -1193,7 +1320,7 @@ Item {
     if (item.kind === "station") { queueStation(item); return }
     if (item.kind === "provplaylist") { queueProviderPlaylist(item); return }
     if (item.kind === "radio") {
-      if (send(v2Request("queue", { "path": String(item.id) }))) settleTimer.restart()
+      if (request("queue", { "path": String(item.id) })) settleTimer.restart()
       return
     }
     if (item.kind === "yt") {
@@ -1204,7 +1331,7 @@ Item {
       var track = { path: String(item.id), title: String(item.name || ""),
                     artist: String(item.artist || ""), stream: true }
       if (item.duration > 0) track.duration_secs = Number(item.duration)
-      if (send(v2Request("track.queue", { "track": track }))) settleTimer.restart()
+      if (request("track.queue", { "track": track })) settleTimer.restart()
       return
     }
     var verbByKind = { song: "url-song", albumsong: "url-song", album: "urls",
@@ -1234,9 +1361,9 @@ Item {
             var track = { path: path, title: String(rows[i].title || ""),
                           artist: String(rows[i].artist || ""), stream: true }
             if (Number(rows[i].duration) > 0) track.duration_secs = Number(rows[i].duration)
-            root.send(v2Request("track.queue", { "track": track }))
+            root.request("track.queue", { "track": track })
           } else {
-            root.send(v2Request("queue", { "path": path }))
+            root.request("queue", { "path": path })
           }
         }
         if (rows.length > 0) settleTimer.restart()
@@ -1289,7 +1416,7 @@ Item {
 
   function loadPlaylist(name) {
     if (!name) return
-    if (send(v2Request("load", { "playlist": String(name) }))) settleTimer.restart()
+    if (request("load", { "playlist": String(name) })) settleTimer.restart()
   }
 
   // Shuffle and repeat have no documented socket verb, so they go through the CLI on

@@ -99,6 +99,10 @@ function defaultStatus() {
     repeat: "Off",
     visualizer: "",
     eqFlat: true,
+    // cliamp 2.x only: its counters for "something changed" and "the live
+    // playlist changed". -1 where the daemon reports none (1.x).
+    revision: -1,
+    playlistRevision: -1,
     lastError: ""
   }
 }
@@ -108,9 +112,6 @@ function defaultStatus() {
 //  "position":16.87,"duration":600,"volume":-6.04,"total":1,"shuffle":false,"repeat":"Off",...}
 // A radio entry adds "stream":true inside track. When no socket exists cliamp exits 1
 // and prints a plain sentence instead of JSON.
-// v2 snapshot responses (status/snapshot) carry the runtime state in a
-// snapshot field instead of flat fields. parseStatus handles both shapes so
-// the plugin works with cliamp v1 and v2.
 function parseStatus(raw) {
   var out = defaultStatus()
   if (frameTooLarge(raw)) {
@@ -137,50 +138,31 @@ function parseStatus(raw) {
 
   out.ok = data.ok === true
   if (!out.ok) {
-    out.lastError = elideError(String((data.error && data.error.message) || data.error || text))
+    out.lastError = elideError(String(data.error || text))
     return out
   }
 
-  // v2 protocol: state lives in a snapshot envelope.
-  if (data.snapshot && typeof data.snapshot === "object") {
-    var snap = data.snapshot
-    out.state = clampText(snap.state || "stopped", MAX_TEXT_CHARS)
-    out.volumeDb = numberOr(snap.volume, 0)
-    out.total = numberOr(snap.total, 0)
-    out.index = numberOr(snap.index, -1)
-    out.shuffle = snap.shuffle === true
-    out.repeat = clampText(snap.repeat || "Off", MAX_TEXT_CHARS)
-    out.visualizer = clampText(snap.visualizer, MAX_TEXT_CHARS)
-    out.eqFlat = bandsAreFlat(snap.eq_bands)
-
-    out.durationSec = numberOr(snap.duration, 0)
-    out.positionSec = numberOr(snap.position, 0)
-
-    var track = snap.track || snap.logical_track
-    if (track && typeof track === "object") {
-      out.title = clampText(track.title, MAX_TEXT_CHARS)
-      out.path = clampText(track.path, MAX_PATH_CHARS)
-      out.artist = clampText(track.artist, MAX_TEXT_CHARS)
-      out.album = clampText(track.album, MAX_TEXT_CHARS)
-      out.isStream = track.stream === true
-      if (out.durationSec <= 0) out.durationSec = numberOr(track.duration_secs, 0)
-    }
-    return out
-  }
-
-  out.state = clampText(data.state || "stopped", MAX_TEXT_CHARS)
-  out.volumeDb = numberOr(data.volume, 0)
-  out.total = numberOr(data.total, 0)
+  fillStatus(out, data)
   out.index = numberOr(data.index, -1)
-  out.shuffle = data.shuffle === true
-  out.repeat = clampText(data.repeat || "Off", MAX_TEXT_CHARS)
-  out.visualizer = clampText(data.visualizer, MAX_TEXT_CHARS)
-  out.eqFlat = bandsAreFlat(data.eq_bands)
+  return out
+}
 
-  out.durationSec = numberOr(data.duration, 0)
-  out.positionSec = numberOr(data.position, 0)
+// The player state fields, spelled the same in a 1.x status reply and in a 2.x
+// snapshot. index is left to the caller: the two generations disagree on what
+// a missing one means.
+function fillStatus(out, src) {
+  out.state = clampText(src.state || "stopped", MAX_TEXT_CHARS)
+  out.volumeDb = numberOr(src.volume, 0)
+  out.total = numberOr(src.total, 0)
+  out.shuffle = src.shuffle === true
+  out.repeat = clampText(src.repeat || "Off", MAX_TEXT_CHARS)
+  out.visualizer = clampText(src.visualizer, MAX_TEXT_CHARS)
+  out.eqFlat = bandsAreFlat(src.eq_bands)
 
-  var track = data.track
+  out.durationSec = numberOr(src.duration, 0)
+  out.positionSec = numberOr(src.position, 0)
+
+  var track = src.track
   if (track && typeof track === "object") {
     out.title = clampText(track.title, MAX_TEXT_CHARS)
     out.path = clampText(track.path, MAX_PATH_CHARS)
@@ -189,7 +171,6 @@ function parseStatus(raw) {
     out.isStream = track.stream === true
     if (out.durationSec <= 0) out.durationSec = numberOr(track.duration_secs, 0)
   }
-  return out
 }
 
 // A ten band EQ with anything but zeros is DSP, so the samples are no longer the
@@ -344,44 +325,23 @@ function asBool(value, fallback) {
 // The exact answer cliamp gives for a track it found no lyrics for, measured on the box.
 var NO_LYRICS_ERROR = "no lyrics found"
 
-// v2 job acknowledgment: {"version":2,"ok":true,"job":{"id":"...","operation":"toggle","state":"queued"}}
-function parseJobAck(raw) {
-  if (frameTooLarge(raw)) return null
-  var data = null
-  try {
-    data = JSON.parse(String(raw || "").trim())
-  } catch (e) {
-    return null
-  }
-  if (!data || !data.job || !data.job.id) return null
-  return {
-    id: String(data.job.id || ""),
-    operation: String(data.job.operation || "")
-  }
-}
-
-// v2 job result: {"version":2,"ok":true,"job":{"id":"...","state":"succeeded","result":{...},"snapshot":{...}}}
-function parseJobResult(raw) {
-  if (frameTooLarge(raw)) return null
-  var data = null
-  try {
-    data = JSON.parse(String(raw || "").trim())
-  } catch (e) {
-    return null
-  }
-  if (!data || !data.job) return null
-  var job = data.job
-  return {
-    id: String(job.id || ""),
-    operation: String(job.operation || ""),
-    state: String(job.state || ""),
-    result: job.result,
-    snapshot: job.snapshot
-  }
-}
-
 // Sample input: {"ok":true,"state":"playing",..} {"ok":true,"lyrics":[..]} {"ok":true,"history":[..]} {"ok":true}
 // Only a status carries state; parsing an ack as one blanks the track.
+// One raw line in, one object out — or null for anything oversized, empty,
+// unparsable or not an object. The size guard always runs before JSON.parse.
+function parseObject(raw) {
+  if (frameTooLarge(raw)) return null
+  var text = String(raw || "").trim()
+  if (text.length === 0) return null
+  var data = null
+  try {
+    data = JSON.parse(text)
+  } catch (e) {
+    return null
+  }
+  return data && typeof data === "object" ? data : null
+}
+
 function messageKind(raw) {
   if (frameTooLarge(raw)) return "none"
   var text = String(raw || "").trim()
@@ -393,15 +353,9 @@ function messageKind(raw) {
     return "ack"
   }
   if (!data || typeof data !== "object") return "ack"
-  // v2 job replies. The initial acknowledgement is state "queued"; a poll
-  // (job.get) replies "running" while the job is still going and only
-  // "succeeded"/"failed" once it settles and carries the result/snapshot.
-  if (data.job !== undefined && data.job.id !== undefined) {
-    if (data.job.state === "succeeded" || data.job.state === "failed") return "jobresult"
-    if (data.job.state === "running") return "jobpoll"
-    return "job"
-  }
   if (data.providers !== undefined) return "providers"
+  // provider.playlists is the only sender of a playlists field on this socket.
+  if (data.playlists !== undefined) return "stations"
   // queue.list and every queue mutation answer with the track list; checked
   // before status because these replies carry index/total too. provider.tracks
   // replies look the same — the Service tells them apart by what it asked for.
@@ -410,8 +364,6 @@ function messageKind(raw) {
   // Matched whole: a command error that merely names a file cannot be swallowed as this.
   if (data.ok === false && String(data.error || "") === NO_LYRICS_ERROR) return "lyrics"
   if (data.history !== undefined) return "history"
-  // v2 status replies wrap the state: {"version":2,"ok":true,"snapshot":{...state...}}
-  if (data.snapshot !== undefined) return "status"
   if (data.state !== undefined) return "status"
   return "ack"
 }
@@ -429,21 +381,173 @@ function ackError(raw) {
   return elideError(String(data.error || ""))
 }
 
+// ---- cliamp 2.x: versioned envelopes, jobs, events ----
+//
+// cliamp 2.0 replaced the socket protocol outright. 1.x took bare
+// {"cmd":"next"} lines and answered each one in place. 2.x takes only
+// versioned envelopes, answers a state read directly and everything else with
+// a job, and reports each finished job on an event stream. Measured on 2.4.1
+// and read against docs/remote-control.md of that tag:
+//
+//   {"version":2,"id":"state","method":"state.get"}
+//     -> {"version":2,"id":"state","ok":true,"snapshot":{"revision":7,"playlist_revision":3,
+//         "state":"playing","track":{...},"position":1.37,"duration":90,"index":15,"total":16,...}}
+//   {"version":2,"id":"next","method":"operation.submit","operation":"next","params":{}}
+//     -> {"version":2,"id":"next","ok":true,"job":{"id":"4f57...","operation":"next","state":"queued"}}
+//   {"version":2,"id":"events","method":"subscribe","topics":["runtime.state","runtime.job"]}
+//     -> {"version":2,"id":"events","ok":true}, then one line per event:
+//        {"event":"runtime.state","seq":93,"data":{...snapshot...}}
+//        {"event":"runtime.job","seq":97,"data":{"type":"job.succeeded","job":{"id":"4f57...",
+//          "operation":"queue.list","state":"succeeded","result":{...},"snapshot":{...}}}}
+//   a failure: {"version":2,"ok":false,"error":{"code":"invalid_version","message":"..."}}
+//
+// The server writes these with Go's omitempty, so a zero is simply absent: no
+// "volume" is 0 dB, no "index" is the first row, no "position" is 0 and no
+// "tracks" is an empty list. Absence is never "unknown".
+
+// The server's own ceiling for one page of queue.list or provider.tracks.
+var V2_PAGE_SIZE = 200
+
+var V2_STATE_REQUEST = '{"version":2,"id":"state","method":"state.get"}'
+// runtime.state fires on every real change (never on position ticks), and
+// runtime.job carries each job's final record — result and snapshot included.
+var V2_SUBSCRIBE_REQUEST = '{"version":2,"id":"events","method":"subscribe","topics":["runtime.state","runtime.job"]}'
+
+// The request id is echoed on the answer; the operation name is all the
+// correlation a rejected request needs.
+function v2Submit(operation, params) {
+  return JSON.stringify({
+    version: 2,
+    id: String(operation),
+    method: "operation.submit",
+    operation: String(operation),
+    params: params || {}
+  })
+}
+
+// 1.x keeps the arguments beside the verb: {"cmd":"queue.move","index":2,"to":3}.
+function v1Request(cmd, params) {
+  var req = { cmd: String(cmd) }
+  if (params) {
+    for (var key in params) {
+      if (key !== "cmd") req[key] = params[key]
+    }
+  }
+  return JSON.stringify(req)
+}
+
+// Cheap test for "this line came from a 2.x daemon", used while a connection
+// is in 1.x mode so its replies are not parsed twice. Go writes struct fields
+// in declaration order: a response opens with version, an event with event.
+function looksLikeV2(raw) {
+  var head = String(raw || "").slice(0, 16)
+  return head.indexOf('{"version":2') === 0 || head.indexOf('{"event":') === 0
+}
+
+function statusFromSnapshot(snap) {
+  var out = defaultStatus()
+  if (!snap || typeof snap !== "object") return out
+  out.ok = true
+  fillStatus(out, snap)
+  // Absent means row 0 here, unless there are no rows at all.
+  out.index = out.total > 0 ? Math.max(0, Math.floor(numberOr(snap.index, 0))) : -1
+  out.revision = numberOr(snap.revision, 0)
+  out.playlistRevision = numberOr(snap.playlist_revision, 0)
+  return out
+}
+
+// {"code":"internal_error","message":"operation failed","detail":"no lyrics found"}
+// The detail is the part a person can act on, so it wins when present.
+function v2ErrorText(error) {
+  if (!error || typeof error !== "object") return elideError(String(error || ""))
+  return elideError(String(error.detail || error.message || error.code || ""))
+}
+
+// One line off a 2.x socket — a response or an event — as one of:
+//   none      oversized, unparsable, or an event nobody here asked about
+//   legacy    a JSON object without "version":2: a 1.x daemon answered
+//   state     .status, from a state read or a runtime.state event
+//   ack       a job was accepted and is not finished: .operation
+//   job       a job's final record: .operation .ok .error .result .status
+//   error     the request itself was refused: .id .code .message
+//   ok        a bare acknowledgement (the subscription): .id
+//   overflow  the event stream fell behind; the server closes it next
+// .result is the server's own object, unbounded but for the frame cap: hand it
+// to a *FromData / queuePageFromResult reader and keep none of it.
+function parseV2Frame(raw) {
+  var data = parseObject(raw)
+  if (!data) return { kind: "none" }
+  if (typeof data.event === "string") {
+    if (data.event === "system.overflow") return { kind: "overflow" }
+    var payload = data.data && typeof data.data === "object" ? data.data : null
+    if (!payload) return { kind: "none" }
+    if (data.event === "runtime.state") return { kind: "state", id: "", status: statusFromSnapshot(payload) }
+    if (data.event === "runtime.job") return v2JobFrame(payload.job, "")
+    return { kind: "none" }
+  }
+  if (data.version !== 2) return { kind: "legacy" }
+  var id = clampText(data.id, MAX_TEXT_CHARS)
+  if (data.ok !== true) {
+    var code = data.error && typeof data.error === "object" ? clampText(data.error.code, MAX_TEXT_CHARS) : ""
+    return { kind: "error", id: id, code: code, message: v2ErrorText(data.error) }
+  }
+  if (data.snapshot && typeof data.snapshot === "object") {
+    return { kind: "state", id: id, status: statusFromSnapshot(data.snapshot) }
+  }
+  if (data.job !== undefined) return v2JobFrame(data.job, id)
+  return { kind: "ok", id: id }
+}
+
+function v2JobFrame(job, id) {
+  if (!job || typeof job !== "object") return { kind: "none" }
+  var state = String(job.state || "")
+  var out = { kind: "ack", id: id, operation: clampText(job.operation, MAX_TEXT_CHARS) }
+  if (state !== "succeeded" && state !== "failed" && state !== "canceled") return out
+  out.kind = "job"
+  out.ok = state === "succeeded"
+  out.error = out.ok ? "" : (v2ErrorText(job.error) || state)
+  out.result = out.ok && job.result && typeof job.result === "object" ? job.result : null
+  // A failed job changed nothing and carries no snapshot.
+  out.status = job.snapshot && typeof job.snapshot === "object" ? statusFromSnapshot(job.snapshot) : null
+  return out
+}
+
+// The operations whose result is the live queue: queue.list, and every
+// mutation of it. provider.tracks and playnext.list also answer with "tracks",
+// but those are other lists.
+function isQueueOperation(operation) {
+  var op = String(operation || "")
+  return op === "queue" || op.indexOf("queue.") === 0 || op === "track.queue" || op === "track.play"
+}
+
+// 2.x answers queue.list — and every queue mutation — with one page of at
+// most V2_PAGE_SIZE rows, the playing row's index and the size of the whole
+// list: {"ok":true,"index":15,"total":316,"tracks":[{"title":"a","path":"/1"},
+// {"title":"b","path":"/2","index":1}, ...]}. A row's own index is its place
+// in the whole list, so the first row of a page says where the page starts.
+function queuePageFromResult(result) {
+  var out = { index: 0, total: 0, offset: 0, tracks: [] }
+  if (!result || typeof result !== "object") return out
+  var tracks = result.tracks && result.tracks.length !== undefined ? result.tracks : []
+  out.index = Math.max(0, Math.floor(numberOr(result.index, 0)))
+  if (tracks.length > 0 && tracks[0]) out.offset = Math.max(0, Math.floor(numberOr(tracks[0].index, 0)))
+  out.tracks = queueRows(tracks)
+  out.total = Math.max(Math.floor(numberOr(result.total, 0)), out.offset + out.tracks.length)
+  return out
+}
+
 // Sample input, the reply to {"cmd":"lyrics"}, measured on the box:
 // {"ok":true,"lyrics":[{"start":30.23,"text":"One more time"}]}
 // A track with no lyrics answers {"ok":false,"error":"no lyrics found"} instead.
 function parseLyrics(raw) {
+  var data = parseObject(raw)
+  return data && data.ok === true ? lyricsFromData(data) : []
+}
+
+// The rows of a lyrics answer, whichever envelope it travelled in.
+function lyricsFromData(data) {
   var out = []
-  if (frameTooLarge(raw)) return out
-  var text = String(raw || "").trim()
-  if (text.length === 0) return out
-  var data = null
-  try {
-    data = JSON.parse(text)
-  } catch (e) {
-    return out
-  }
-  if (!data || data.ok !== true || !data.lyrics || data.lyrics.length === undefined) return out
+  if (!data || !data.lyrics || data.lyrics.length === undefined) return out
   for (var i = 0; i < data.lyrics.length && out.length < MAX_LIST_ITEMS; i++) {
     var line = data.lyrics[i]
     if (!line) continue
@@ -459,27 +563,40 @@ function parseLyrics(raw) {
 //  "path":"https://...","duration_secs":214,"stream":false,"track_number":4}, ...]}
 // index is omitted when 0, so missing means the first track.
 function parseQueue(raw) {
-  var out = { ok: false, index: 0, tracks: [] }
-  if (frameTooLarge(raw)) return out
-  var data = null
-  try {
-    data = JSON.parse(String(raw || "").trim())
-  } catch (e) {
-    return out
+  var data = parseObject(raw)
+  if (!data || data.ok !== true || !data.tracks || data.tracks.length === undefined) {
+    return { ok: false, index: 0, tracks: [] }
   }
-  if (!data || data.ok !== true || !data.tracks || data.tracks.length === undefined) return out
-  out.ok = true
-  out.index = numberOr(data.index, 0)
-  for (var i = 0; i < data.tracks.length && out.tracks.length < MAX_LIST_ITEMS; i++) {
-    var t = data.tracks[i]
+  return { ok: true, index: numberOr(data.index, 0), tracks: queueRows(data.tracks) }
+}
+
+function queueRows(tracks) {
+  var out = []
+  if (!tracks || tracks.length === undefined) return out
+  for (var i = 0; i < tracks.length && out.length < MAX_LIST_ITEMS; i++) {
+    var t = tracks[i]
     if (!t) continue
-    out.tracks.push({
+    out.push({
       title: clampText(t.title, MAX_TEXT_CHARS),
       artist: clampText(t.artist, MAX_TEXT_CHARS),
       album: clampText(t.album, MAX_TEXT_CHARS),
       durationSec: numberOr(t.duration_secs, 0),
       isStream: t.stream === true
     })
+  }
+  return out
+}
+
+// The paths of a track list reply, in order — what the queue verb takes.
+// count is how many rows the reply held, pathless ones included, because
+// paging advances by rows.
+function trackPaths(data) {
+  var out = { paths: [], count: 0 }
+  if (!data || !data.tracks || data.tracks.length === undefined) return out
+  out.count = Math.min(data.tracks.length, MAX_LIST_ITEMS)
+  for (var i = 0; i < out.count; i++) {
+    var path = data.tracks[i] ? clampText(data.tracks[i].path, MAX_PATH_CHARS) : ""
+    if (path.length > 0) out.paths.push(path)
   }
   return out
 }
@@ -684,17 +801,15 @@ function providerQuery(query) {
 
 // Sample input, the reply to {"cmd":"provider.list"}:
 // {"ok":true,"providers":[{"id":"radio","name":"Radio"},{"id":"local","name":"Local"}]}
-// cliamp v2 names the key field "key" instead of "id", so both are read.
 function parseProviders(raw) {
+  var data = parseObject(raw)
+  return data && data.ok === true ? providersFromData(data) : []
+}
+
+// cliamp 1.x names a provider row's handle "id", 2.x "key"; both are read.
+function providersFromData(data) {
   var out = []
-  if (frameTooLarge(raw)) return out
-  var data = null
-  try {
-    data = JSON.parse(String(raw || "").trim())
-  } catch (e) {
-    return out
-  }
-  if (!data || data.ok !== true || !data.providers || data.providers.length === undefined) return out
+  if (!data || !data.providers || data.providers.length === undefined) return out
   for (var i = 0; i < data.providers.length && out.length < MAX_LIST_ITEMS; i++) {
     var p = data.providers[i]
     if (!p) continue
@@ -716,15 +831,13 @@ function parseProviders(raw) {
 //  {"id":"l:1","name":"Radio Paradise aac","provider":"radio"}, ...]}
 // l: rows are radios.toml stations (l:0 the built-in list), f: rows favorites.
 function parseStations(raw) {
+  var data = parseObject(raw)
+  return data && data.ok === true ? stationsFromData(data) : []
+}
+
+function stationsFromData(data) {
   var out = []
-  if (frameTooLarge(raw)) return out
-  var data = null
-  try {
-    data = JSON.parse(String(raw || "").trim())
-  } catch (e) {
-    return out
-  }
-  if (!data || data.ok !== true || !data.playlists || data.playlists.length === undefined) return out
+  if (!data || !data.playlists || data.playlists.length === undefined) return out
   for (var i = 0; i < data.playlists.length && out.length < MAX_LIST_ITEMS; i++) {
     var p = data.playlists[i]
     if (!p || !p.id) continue
@@ -736,6 +849,16 @@ function parseStations(raw) {
     })
   }
   return out
+}
+
+// Which provider a playlists answer belongs to: every row names it. An empty
+// list names nobody, and the caller falls back on who was waiting.
+function playlistsProvider(data) {
+  if (!data || !data.playlists || data.playlists.length === undefined) return ""
+  for (var i = 0; i < data.playlists.length && i < MAX_LIST_ITEMS; i++) {
+    if (data.playlists[i] && data.playlists[i].provider) return clampText(data.playlists[i].provider, MAX_TEXT_CHARS)
+  }
+  return ""
 }
 
 // Overwritten on every play, so it is plumbing rather than a playlist the user saved.
